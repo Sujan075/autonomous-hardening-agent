@@ -13,6 +13,11 @@ func main() {
 		agentID = "agent-dev"
 	}
 
+	host := os.Getenv("AGENT_HOST")
+	if host == "" {
+		host = "127.0.0.1"
+	}
+
 	port := os.Getenv("AGENT_PORT")
 	if port == "" {
 		port = "9000"
@@ -43,7 +48,7 @@ func main() {
 		})
 	})
 
-	addr := "127.0.0.1:" + port
+	addr := host + ":" + port
 
 	log.Printf("agent_id=%s listening=%s", agentID, addr)
 
