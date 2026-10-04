@@ -1,0 +1,58 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+
+# Go
+bin/
+*.exe
+*.test
+*.out
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+logs/
+
+# Certificates and private keys
+*.key
+*.pem
+*.p12
+*.pfx
+certs/
+private/
+secrets/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
