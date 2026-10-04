@@ -8,6 +8,8 @@ import (
 	"os"
 	"runtime"
 	"strings"
+
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/assessment"
 )
 
 type SystemInfo struct {
@@ -59,6 +61,8 @@ func main() {
 			"status":   "online",
 		})
 	})
+
+	http.HandleFunc("/assessment", assessment.HTTPHandler)
 
 	http.HandleFunc("/discovery", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
