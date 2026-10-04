@@ -11,4 +11,5 @@ dependencies = [
     "PyJWT==2.15.1",
     "cryptography==50.0.2",
     "jsonschema==4.26.0",
+    "sqlalchemy==2.0.44",
 ]
