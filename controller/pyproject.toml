@@ -1,0 +1,14 @@
+[project]
+name = "autonomous-hardening-controller"
+version = "0.1.0"
+description = "Central controller for the Autonomous Multi-Platform Security Hardening Agent"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.142.2",
+    "uvicorn==0.53.0",
+    "pydantic==2.13.5",
+    "pwdlib[argon2]==0.3.1",
+    "PyJWT==2.15.1",
+    "cryptography==50.0.2",
+    "jsonschema==4.26.0",
+]
