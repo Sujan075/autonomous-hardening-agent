@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.targets import router as targets_router
+from app.api.agent_status import router as agent_status_router
 from app.db.database import engine
 from app.db.models import Base
 
@@ -20,6 +21,7 @@ app = FastAPI(
 )
 
 app.include_router(targets_router)
+app.include_router(agent_status_router)
 
 
 @app.get("/health")
