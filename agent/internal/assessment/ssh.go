@@ -1,27 +1,34 @@
 package assessment
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
 	"strings"
 )
 
-const sshdBinary = "/usr/sbin/sshd"
+const (
+	sudoBinary = "/usr/bin/sudo"
+	sshdBinary = "/usr/sbin/sshd"
+)
+
+type sshConfigRunner func() (stdout, stderr []byte, err error)
+
+var requiredSSHDirectives = []string{
+	"permitemptypasswords",
+	"permitrootlogin",
+	"permituserenvironment",
+	"usepam",
+}
 
 func AssessSSHControls() []Finding {
-	config, err := readEffectiveSSHConfig()
+	return assessSSHControls(runEffectiveSSHConfig)
+}
+
+func assessSSHControls(runner sshConfigRunner) []Finding {
+	config, err := readEffectiveSSHConfig(runner)
 	if err != nil {
-		return []Finding{
-			{
-				ControlID:     "SSH-ASSESS-ERROR",
-				Title:         "Read effective SSH configuration",
-				Status:        StatusError,
-				Severity:      "HIGH",
-				CurrentValue:  "",
-				ExpectedValue: "Effective SSH configuration is readable",
-				Message:       err.Error(),
-			},
-		}
+		return []Finding{sshAssessmentError(err)}
 	}
 
 	return []Finding{
@@ -60,28 +67,95 @@ func AssessSSHControls() []Finding {
 	}
 }
 
-func readEffectiveSSHConfig() (map[string]string, error) {
-	output, err := exec.Command(sshdBinary, "-T").Output()
+func runEffectiveSSHConfig() ([]byte, []byte, error) {
+	command := exec.Command(sudoBinary, "-n", sshdBinary, "-T")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	stdout, err := command.Output()
+	return stdout, stderr.Bytes(), err
+}
+
+func readEffectiveSSHConfig(runner sshConfigRunner) (map[string]string, error) {
+	stdout, stderr, err := runner()
 	if err != nil {
-		return nil, fmt.Errorf("failed to evaluate effective SSH configuration: %w", err)
+		diagnostic := sanitizeDiagnostic(stderr)
+		if diagnostic == "" {
+			return nil, fmt.Errorf("failed to evaluate effective SSH configuration: %w", err)
+		}
+		return nil, fmt.Errorf("failed to evaluate effective SSH configuration: %w (stderr: %s)", err, diagnostic)
 	}
 
+	config, err := parseEffectiveSSHConfig(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse effective SSH configuration: %w", err)
+	}
+	return config, nil
+}
+
+func parseEffectiveSSHConfig(output []byte) (map[string]string, error) {
 	values := make(map[string]string)
-
-	for _, line := range strings.Split(string(output), "\n") {
+	for lineNumber, line := range strings.Split(string(output), "\n") {
 		fields := strings.Fields(line)
-
-		if len(fields) < 2 {
+		if len(fields) == 0 {
 			continue
 		}
 
 		key := strings.ToLower(fields[0])
-		value := strings.ToLower(fields[1])
+		if !isRequiredSSHDirective(key) {
+			continue
+		}
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("malformed %s directive on line %d", fields[0], lineNumber+1)
+		}
+		if _, exists := values[key]; exists {
+			return nil, fmt.Errorf("duplicate %s directive", fields[0])
+		}
+		values[key] = strings.ToLower(fields[1])
+	}
 
-		values[key] = value
+	missing := make([]string, 0)
+	for _, directive := range requiredSSHDirectives {
+		if _, exists := values[directive]; !exists {
+			missing = append(missing, directive)
+		}
+	}
+	if len(missing) != 0 {
+		return nil, fmt.Errorf("missing required directives: %s", strings.Join(missing, ", "))
 	}
 
 	return values, nil
+}
+
+func isRequiredSSHDirective(key string) bool {
+	for _, directive := range requiredSSHDirectives {
+		if key == directive {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeDiagnostic(stderr []byte) string {
+	text := strings.ToValidUTF8(string(stderr), "�")
+	diagnostic := strings.Join(strings.Fields(text), " ")
+	const maxDiagnosticRunes = 1024
+	runes := []rune(diagnostic)
+	if len(runes) > maxDiagnosticRunes {
+		return string(runes[:maxDiagnosticRunes]) + "…"
+	}
+	return diagnostic
+}
+
+func sshAssessmentError(err error) Finding {
+	return Finding{
+		ControlID:     "SSH-ASSESS-ERROR",
+		Title:         "Read effective SSH configuration",
+		Status:        StatusError,
+		Severity:      "HIGH",
+		CurrentValue:  "",
+		ExpectedValue: "Effective SSH configuration is readable",
+		Message:       err.Error(),
+	}
 }
 
 func checkSSHDirective(

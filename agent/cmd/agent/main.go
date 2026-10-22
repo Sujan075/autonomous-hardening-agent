@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/assessment"
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/executor"
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/planner"
 )
 
 type SystemInfo struct {
@@ -63,6 +65,10 @@ func main() {
 	})
 
 	http.HandleFunc("/assessment", assessment.HTTPHandler)
+
+	http.HandleFunc("/plan", planner.HTTPHandler)
+	http.HandleFunc("/execute", executor.ExecuteHandler)
+	http.HandleFunc("/rollback", executor.RollbackHandler)
 
 	http.HandleFunc("/discovery", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
