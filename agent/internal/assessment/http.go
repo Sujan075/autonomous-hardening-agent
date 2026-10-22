@@ -11,10 +11,7 @@ func HTTPHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	assessment := Assessment{
-		Platform: PlatformUbuntu,
-		Findings: AssessSSHControls(),
-	}
+	assessment := AssessCurrentHost()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

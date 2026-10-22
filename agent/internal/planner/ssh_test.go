@@ -53,6 +53,22 @@ func TestBuildAssessmentPlanCompleteFailingSSHRootLoginRequiresApproval(t *testi
 	}
 }
 
+func TestBuildAssessmentPlanBlocksUnsupportedCentOSStreamAssessment(t *testing.T) {
+	plan := BuildAssessmentPlan(assessment.Assessment{
+		Platform: "centos-stream",
+		Findings: []assessment.Finding{{
+			ControlID: "PLATFORM-ASSESSMENT-UNSUPPORTED",
+			Status:    assessment.StatusUnknown,
+			Error: &assessment.NormalizedError{
+				Code: "PLATFORM_OR_CONTROL_SET_UNSUPPORTED",
+			},
+		}},
+	})
+	if plan.Status != PlanStatusBlocked || plan.Platform != "centos-stream" || len(plan.Actions) != 0 {
+		t.Fatalf("unsupported CentOS Stream plan = %#v, want blocked with no actions", plan)
+	}
+}
+
 func TestBuildAssessmentPlanFailsClosedForIncompleteOrUncertainAssessments(t *testing.T) {
 	tests := []struct {
 		name    string

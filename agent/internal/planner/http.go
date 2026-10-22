@@ -13,10 +13,7 @@ func HTTPHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	assessmentResult := assessment.Assessment{
-		Platform: assessment.PlatformUbuntu,
-		Findings: assessment.AssessSSHControls(),
-	}
+	assessmentResult := assessment.AssessCurrentHost()
 	plan := BuildAssessmentPlan(assessmentResult)
 
 	w.Header().Set("Content-Type", "application/json")
