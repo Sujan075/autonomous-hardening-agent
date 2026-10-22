@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/assessment"
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/catalog"
 )
 
 func TestBuildAssessmentPlanCompleteCompliantUbuntuIsReady(t *testing.T) {
@@ -25,7 +26,7 @@ func TestBuildAssessmentPlanCompleteCompliantUbuntuIsReady(t *testing.T) {
 func TestBuildAssessmentPlanCompleteFailingSSHRootLoginRequiresApproval(t *testing.T) {
 	findings := completeUbuntuFindings()
 	findings[1].Status = assessment.StatusFail
-	findings[1].CurrentValue = "yes"
+	setCurrentValue(&findings[1], "yes")
 
 	plan := BuildAssessmentPlan(assessment.Assessment{
 		Platform: assessment.PlatformUbuntu,
@@ -36,13 +37,18 @@ func TestBuildAssessmentPlanCompleteFailingSSHRootLoginRequiresApproval(t *testi
 		t.Fatalf("plan = %#v, want READY with one approval action", plan)
 	}
 	action := plan.Actions[0]
-	if action.ActionID != "ACT-SSH-5.1.20" || action.ControlID != "5.1.20" {
+	control, ok := catalog.Lookup(catalog.PlatformUbuntu, "5.1.20")
+	if !ok {
+		t.Fatal("catalog missing 5.1.20")
+	}
+	remediation := control.Remediation
+	if action.ActionID != remediation.ActionID || action.ControlID != control.ID {
 		t.Errorf("unexpected action identity: %#v", action)
 	}
-	if action.ActionType != "SET_SSH_DIRECTIVE" || action.DesiredValue != "no" {
+	if action.ActionType != remediation.ActionType || action.DesiredValue != remediation.DesiredValue || action.Title != remediation.ActionTitle {
 		t.Errorf("unexpected action: %#v", action)
 	}
-	if action.RiskScore != 3.8 || action.ExecutionMode != ExecutionApproval {
+	if action.RiskScore != remediation.RiskScore || !remediation.RequiresApproval || action.ExecutionMode != ExecutionApproval {
 		t.Errorf("action must remain approval-required: %#v", action)
 	}
 }
@@ -98,6 +104,22 @@ func TestBuildAssessmentPlanFailsClosedForIncompleteOrUncertainAssessments(t *te
 			},
 		},
 		{
+			name: "missing required evidence",
+			prepare: func() assessment.Assessment {
+				findings := completeUbuntuFindings()
+				findings[0].Evidence = nil
+				return assessment.Assessment{Platform: assessment.PlatformUbuntu, Findings: findings}
+			},
+		},
+		{
+			name: "evidence does not match current value",
+			prepare: func() assessment.Assessment {
+				findings := completeUbuntuFindings()
+				findings[0].Evidence[0].Value = "yes"
+				return assessment.Assessment{Platform: assessment.PlatformUbuntu, Findings: findings}
+			},
+		},
+		{
 			name: "not applicable without policy rule",
 			prepare: func() assessment.Assessment {
 				findings := completeUbuntuFindings()
@@ -131,7 +153,7 @@ func TestBuildAssessmentPlanFailsClosedForIncompleteOrUncertainAssessments(t *te
 			name: "inconsistent PASS values",
 			prepare: func() assessment.Assessment {
 				findings := completeUbuntuFindings()
-				findings[0].CurrentValue = "yes"
+				setCurrentValue(&findings[0], "yes")
 				return assessment.Assessment{Platform: assessment.PlatformUbuntu, Findings: findings}
 			},
 		},
@@ -140,7 +162,7 @@ func TestBuildAssessmentPlanFailsClosedForIncompleteOrUncertainAssessments(t *te
 			prepare: func() assessment.Assessment {
 				findings := completeUbuntuFindings()
 				findings[0].Status = assessment.StatusFail
-				findings[0].CurrentValue = "yes"
+				setCurrentValue(&findings[0], "yes")
 				return assessment.Assessment{Platform: assessment.PlatformUbuntu, Findings: findings}
 			},
 		},
@@ -165,9 +187,16 @@ func TestBuildSSHPlanRequiresAllUbuntuControls(t *testing.T) {
 	assertBlockedWithoutActions(t, plan)
 }
 
+func TestBuildAssessmentPlanBlocksInvalidCatalogDefinitions(t *testing.T) {
+	controls := catalog.Controls(catalog.PlatformUbuntu)
+	controls[1].ExpectedValue = "yes"
+	plan := buildUbuntuSSHPlanWithCatalog(completeUbuntuFindings(), controls)
+	assertBlockedWithoutActions(t, plan)
+}
+
 func TestBuildAssessmentPlanBlocksEveryMissingRequiredControl(t *testing.T) {
-	for missingIndex, controlID := range requiredUbuntuSSHControls {
-		t.Run(controlID, func(t *testing.T) {
+	for missingIndex, control := range catalog.Controls(catalog.PlatformUbuntu) {
+		t.Run(control.ID, func(t *testing.T) {
 			findings := completeUbuntuFindings()
 			findings = append(findings[:missingIndex], findings[missingIndex+1:]...)
 			plan := BuildAssessmentPlan(assessment.Assessment{
@@ -190,22 +219,35 @@ func TestPlanStatusIsSerializedAsJSON(t *testing.T) {
 }
 
 func completeUbuntuFindings() []assessment.Finding {
-	return []assessment.Finding{
-		compliantSSHControl("5.1.19", "no", "MEDIUM"),
-		compliantSSHControl("5.1.20", "no", "HIGH"),
-		compliantSSHControl("5.1.21", "no", "MEDIUM"),
-		compliantSSHControl("5.1.22", "yes", "MEDIUM"),
+	controls := catalog.Controls(catalog.PlatformUbuntu)
+	findings := make([]assessment.Finding, 0, len(controls))
+	for _, control := range controls {
+		finding := assessment.Finding{
+			ControlID:     control.ID,
+			Title:         control.Title,
+			Status:        assessment.StatusPass,
+			Applicability: assessment.ApplicabilityApplicable,
+			Severity:      control.Severity,
+			CurrentValue:  control.ExpectedValue,
+			ExpectedValue: control.ExpectedValue,
+		}
+		for _, expected := range control.Evidence {
+			finding.Source = expected.Source
+			finding.Evidence = append(finding.Evidence, assessment.Evidence{
+				Name:   expected.SettingKey,
+				Value:  control.ExpectedValue,
+				Source: expected.Source,
+			})
+		}
+		findings = append(findings, finding)
 	}
+	return findings
 }
 
-func compliantSSHControl(controlID, value, severity string) assessment.Finding {
-	return assessment.Finding{
-		ControlID:     controlID,
-		Status:        assessment.StatusPass,
-		Applicability: assessment.ApplicabilityApplicable,
-		Severity:      severity,
-		CurrentValue:  value,
-		ExpectedValue: value,
+func setCurrentValue(finding *assessment.Finding, value string) {
+	finding.CurrentValue = value
+	for i := range finding.Evidence {
+		finding.Evidence[i].Value = value
 	}
 }
 

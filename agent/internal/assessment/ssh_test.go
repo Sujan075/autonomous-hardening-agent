@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/catalog"
 )
 
 const compliantSSHDOutput = `permitemptyPasswords no
@@ -52,6 +54,7 @@ func TestAssessSSHControlsCompliantConfiguration(t *testing.T) {
 	}
 	for i, expected := range want {
 		finding := findings[i]
+		definition := catalog.Controls(catalog.PlatformUbuntu)[i]
 		if finding.ControlID != expected.controlID {
 			t.Errorf("finding %d control ID = %q, want %q", i, finding.ControlID, expected.controlID)
 		}
@@ -60,6 +63,15 @@ func TestAssessSSHControlsCompliantConfiguration(t *testing.T) {
 		}
 		if finding.ExpectedValue != expected.value || finding.CurrentValue != expected.value {
 			t.Errorf("finding %s values = current %q, expected %q; want both %q", finding.ControlID, finding.CurrentValue, finding.ExpectedValue, expected.value)
+		}
+		if finding.Title != definition.Title || finding.Severity != definition.Severity || finding.ExpectedValue != definition.ExpectedValue {
+			t.Errorf("finding %s does not reflect catalog definition: %#v", finding.ControlID, finding)
+		}
+		if finding.Applicability != ApplicabilityApplicable || finding.Source != definition.Evidence[0].Source || len(finding.Evidence) != len(definition.Evidence) {
+			t.Errorf("finding %s does not include catalog applicability/evidence metadata: %#v", finding.ControlID, finding)
+		}
+		if len(finding.Evidence) > 0 && (finding.Evidence[0].Name != definition.Evidence[0].SettingKey || finding.Evidence[0].Source != definition.Evidence[0].Source || finding.Evidence[0].Value != expected.value) {
+			t.Errorf("finding %s evidence differs from catalog: %#v", finding.ControlID, finding.Evidence)
 		}
 	}
 }

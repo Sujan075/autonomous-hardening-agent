@@ -5,68 +5,39 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/catalog"
 )
 
 const (
-	PlatformUbuntu  = "ubuntu"
-	sshConfigSource = "ssh.effective_config"
+	PlatformUbuntu  = string(catalog.PlatformUbuntu)
+	sshConfigSource = catalog.EffectiveSSHConfigSource
 	sudoBinary      = "/usr/bin/sudo"
 	sshdBinary      = "/usr/sbin/sshd"
 )
 
 type sshConfigRunner func() (stdout, stderr []byte, err error)
 
-var requiredSSHDirectives = []string{
-	"permitemptypasswords",
-	"permitrootlogin",
-	"permituserenvironment",
-	"usepam",
-}
-
 func AssessSSHControls() []Finding {
 	return assessSSHControls(runEffectiveSSHConfig)
 }
 
 func assessSSHControls(runner sshConfigRunner) []Finding {
+	controls := catalog.Controls(catalog.PlatformUbuntu)
+	if err := catalog.Validate(controls); err != nil {
+		return []Finding{sshAssessmentError(fmt.Errorf("invalid control catalog: %w", err))}
+	}
+
 	config, err := readEffectiveSSHConfig(runner)
 	if err != nil {
 		return []Finding{sshAssessmentError(err)}
 	}
 
-	return []Finding{
-		checkSSHDirective(
-			config,
-			"5.1.19",
-			"Disable SSH empty passwords",
-			"PermitEmptyPasswords",
-			"no",
-			"MEDIUM",
-		),
-		checkSSHDirective(
-			config,
-			"5.1.20",
-			"Disable SSH root login",
-			"PermitRootLogin",
-			"no",
-			"HIGH",
-		),
-		checkSSHDirective(
-			config,
-			"5.1.21",
-			"Disable SSH user environment",
-			"PermitUserEnvironment",
-			"no",
-			"MEDIUM",
-		),
-		checkSSHDirective(
-			config,
-			"5.1.22",
-			"Enable SSH PAM",
-			"UsePAM",
-			"yes",
-			"MEDIUM",
-		),
+	findings := make([]Finding, 0, len(controls))
+	for _, control := range controls {
+		findings = append(findings, checkSSHDirective(config, control))
 	}
+	return findings
 }
 
 func runEffectiveSSHConfig() ([]byte, []byte, error) {
@@ -95,6 +66,12 @@ func readEffectiveSSHConfig(runner sshConfigRunner) (map[string]string, error) {
 }
 
 func parseEffectiveSSHConfig(output []byte) (map[string]string, error) {
+	controls := catalog.Controls(catalog.PlatformUbuntu)
+	requiredDirectives := make(map[string]struct{}, len(controls))
+	for _, control := range controls {
+		requiredDirectives[strings.ToLower(control.EffectiveSettingKey)] = struct{}{}
+	}
+
 	values := make(map[string]string)
 	for lineNumber, line := range strings.Split(string(output), "\n") {
 		fields := strings.Fields(line)
@@ -103,7 +80,7 @@ func parseEffectiveSSHConfig(output []byte) (map[string]string, error) {
 		}
 
 		key := strings.ToLower(fields[0])
-		if !isRequiredSSHDirective(key) {
+		if _, required := requiredDirectives[key]; !required {
 			continue
 		}
 		if len(fields) != 2 {
@@ -116,7 +93,8 @@ func parseEffectiveSSHConfig(output []byte) (map[string]string, error) {
 	}
 
 	missing := make([]string, 0)
-	for _, directive := range requiredSSHDirectives {
+	for _, control := range controls {
+		directive := strings.ToLower(control.EffectiveSettingKey)
 		if _, exists := values[directive]; !exists {
 			missing = append(missing, directive)
 		}
@@ -126,15 +104,6 @@ func parseEffectiveSSHConfig(output []byte) (map[string]string, error) {
 	}
 
 	return values, nil
-}
-
-func isRequiredSSHDirective(key string) bool {
-	for _, directive := range requiredSSHDirectives {
-		if key == directive {
-			return true
-		}
-	}
-	return false
 }
 
 func sanitizeDiagnostic(stderr []byte) string {
@@ -169,12 +138,9 @@ func sshAssessmentError(err error) Finding {
 
 func checkSSHDirective(
 	config map[string]string,
-	controlID string,
-	title string,
-	directive string,
-	expected string,
-	severity string,
+	control catalog.Control,
 ) Finding {
+	directive := control.EffectiveSettingKey
 	current, exists := config[strings.ToLower(directive)]
 
 	if !exists {
@@ -183,7 +149,7 @@ func checkSSHDirective(
 
 	status := StatusFail
 
-	if strings.EqualFold(current, expected) {
+	if strings.EqualFold(current, control.ExpectedValue) {
 		status = StatusPass
 	}
 
@@ -193,20 +159,29 @@ func checkSSHDirective(
 		message = "Effective configuration matches expected value"
 	}
 
+	evidence := make([]Evidence, 0, len(control.Evidence))
+	for _, expectation := range control.Evidence {
+		evidence = append(evidence, Evidence{
+			Name:   expectation.SettingKey,
+			Value:  config[strings.ToLower(expectation.SettingKey)],
+			Source: expectation.Source,
+		})
+	}
+	source := sshConfigSource
+	if len(control.Evidence) > 0 {
+		source = control.Evidence[0].Source
+	}
+
 	return Finding{
-		ControlID:     controlID,
-		Title:         title,
+		ControlID:     control.ID,
+		Title:         control.Title,
 		Status:        status,
 		Applicability: ApplicabilityApplicable,
-		Severity:      severity,
+		Severity:      control.Severity,
 		CurrentValue:  current,
-		ExpectedValue: expected,
+		ExpectedValue: control.ExpectedValue,
 		Message:       message,
-		Source:        sshConfigSource,
-		Evidence: []Evidence{{
-			Name:   directive,
-			Value:  current,
-			Source: sshConfigSource,
-		}},
+		Source:        source,
+		Evidence:      evidence,
 	}
 }

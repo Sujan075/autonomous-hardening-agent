@@ -5,9 +5,8 @@ import (
 	"strings"
 
 	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/assessment"
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/catalog"
 )
-
-var requiredUbuntuSSHControls = []string{"5.1.19", "5.1.20", "5.1.21", "5.1.22"}
 
 func BuildSSHPlan(findings []assessment.Finding) Plan {
 	return buildUbuntuSSHPlan(findings)
@@ -21,9 +20,13 @@ func BuildAssessmentPlan(result assessment.Assessment) Plan {
 }
 
 func buildUbuntuSSHPlan(findings []assessment.Finding) Plan {
+	return buildUbuntuSSHPlanWithCatalog(findings, catalog.Controls(catalog.PlatformUbuntu))
+}
+
+func buildUbuntuSSHPlanWithCatalog(findings []assessment.Finding, controls []catalog.Control) Plan {
 	plan := Plan{
 		Status:   PlanStatusReady,
-		Platform: assessment.PlatformUbuntu,
+		Platform: string(catalog.PlatformUbuntu),
 		Actions:  make([]Action, 0),
 	}
 	block := func() Plan {
@@ -31,13 +34,16 @@ func buildUbuntuSSHPlan(findings []assessment.Finding) Plan {
 		plan.Actions = make([]Action, 0)
 		return plan
 	}
-	if len(findings) == 0 {
+	if len(findings) == 0 || len(controls) == 0 || catalog.Validate(controls) != nil {
 		return block()
 	}
 
-	required := make(map[string]struct{}, len(requiredUbuntuSSHControls))
-	for _, controlID := range requiredUbuntuSSHControls {
-		required[controlID] = struct{}{}
+	required := make(map[string]catalog.Control, len(controls))
+	for _, control := range controls {
+		if control.Scope.Platform != catalog.PlatformUbuntu {
+			return block()
+		}
+		required[control.ID] = control
 	}
 	seen := make(map[string]struct{}, len(findings))
 	byControl := make(map[string]assessment.Finding, len(findings))
@@ -47,7 +53,8 @@ func buildUbuntuSSHPlan(findings []assessment.Finding) Plan {
 			return block()
 		}
 		seen[finding.ControlID] = struct{}{}
-		if _, known := required[finding.ControlID]; !known {
+		control, known := required[finding.ControlID]
+		if !known {
 			return block()
 		}
 		if finding.Error != nil || finding.Status == assessment.StatusError || finding.Status == assessment.StatusUnknown {
@@ -56,7 +63,10 @@ func buildUbuntuSSHPlan(findings []assessment.Finding) Plan {
 		if finding.Applicability != assessment.ApplicabilityApplicable {
 			return block()
 		}
-		if finding.CurrentValue == "" || finding.ExpectedValue == "" || finding.Severity == "" {
+		if finding.Title != control.Title || finding.Severity != control.Severity || finding.ExpectedValue != control.ExpectedValue {
+			return block()
+		}
+		if finding.CurrentValue == "" || finding.ExpectedValue == "" || !hasExpectedEvidence(finding, control) {
 			return block()
 		}
 		switch finding.Status {
@@ -74,10 +84,10 @@ func buildUbuntuSSHPlan(findings []assessment.Finding) Plan {
 		byControl[finding.ControlID] = finding
 	}
 
-	if len(byControl) != len(requiredUbuntuSSHControls) {
+	if len(byControl) != len(controls) {
 		return block()
 	}
-	for _, controlID := range requiredUbuntuSSHControls {
+	for controlID := range required {
 		if _, exists := byControl[controlID]; !exists {
 			return block()
 		}
@@ -88,30 +98,27 @@ func buildUbuntuSSHPlan(findings []assessment.Finding) Plan {
 			continue
 		}
 
-		switch finding.ControlID {
-		case "5.1.20":
-			if finding.ExpectedValue != "no" {
-				return block()
-			}
-			plan.Actions = append(plan.Actions, Action{
-				ActionID:      "ACT-SSH-5.1.20",
-				ControlID:     finding.ControlID,
-				Title:         "Disable SSH root login",
-				ActionType:    "SET_SSH_DIRECTIVE",
-				CurrentValue:  finding.CurrentValue,
-				DesiredValue:  finding.ExpectedValue,
-				RiskScore:     3.8,
-				ExecutionMode: ExecutionApproval,
-				Reason: fmt.Sprintf(
-					"High-impact SSH authentication change: %s -> %s",
-					finding.CurrentValue,
-					finding.ExpectedValue,
-				),
-			})
-		default:
+		control := required[finding.ControlID]
+		remediation := control.Remediation
+		if !remediation.Supported || !remediation.RequiresApproval || finding.ExpectedValue != remediation.DesiredValue {
 			// No approved remediation is defined for this failing control.
 			return block()
 		}
+		plan.Actions = append(plan.Actions, Action{
+			ActionID:      remediation.ActionID,
+			ControlID:     finding.ControlID,
+			Title:         remediation.ActionTitle,
+			ActionType:    remediation.ActionType,
+			CurrentValue:  finding.CurrentValue,
+			DesiredValue:  remediation.DesiredValue,
+			RiskScore:     remediation.RiskScore,
+			ExecutionMode: ExecutionApproval,
+			Reason: fmt.Sprintf(
+				"High-impact SSH authentication change: %s -> %s",
+				finding.CurrentValue,
+				remediation.DesiredValue,
+			),
+		})
 	}
 
 	return plan
@@ -123,4 +130,29 @@ func blockedPlan(platform string) Plan {
 		Platform: platform,
 		Actions:  make([]Action, 0),
 	}
+}
+
+func hasExpectedEvidence(finding assessment.Finding, control catalog.Control) bool {
+	if finding.Source == "" || len(finding.Evidence) < len(control.Evidence) {
+		return false
+	}
+	for _, expected := range control.Evidence {
+		if finding.Source != expected.Source {
+			return false
+		}
+		found := false
+		for _, evidence := range finding.Evidence {
+			if evidence.Name == expected.SettingKey && evidence.Source == expected.Source && evidence.Value != "" {
+				if evidence.Name == control.EffectiveSettingKey && evidence.Value != finding.CurrentValue {
+					return false
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
