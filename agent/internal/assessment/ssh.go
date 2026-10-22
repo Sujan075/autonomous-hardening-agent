@@ -8,8 +8,10 @@ import (
 )
 
 const (
-	sudoBinary = "/usr/bin/sudo"
-	sshdBinary = "/usr/sbin/sshd"
+	PlatformUbuntu  = "ubuntu"
+	sshConfigSource = "ssh.effective_config"
+	sudoBinary      = "/usr/bin/sudo"
+	sshdBinary      = "/usr/sbin/sshd"
 )
 
 type sshConfigRunner func() (stdout, stderr []byte, err error)
@@ -151,10 +153,17 @@ func sshAssessmentError(err error) Finding {
 		ControlID:     "SSH-ASSESS-ERROR",
 		Title:         "Read effective SSH configuration",
 		Status:        StatusError,
+		Applicability: ApplicabilityApplicable,
 		Severity:      "HIGH",
 		CurrentValue:  "",
 		ExpectedValue: "Effective SSH configuration is readable",
 		Message:       err.Error(),
+		Source:        sshConfigSource,
+		Error: &NormalizedError{
+			Code:    "ASSESSMENT_EVALUATION_FAILED",
+			Message: err.Error(),
+			Source:  sshConfigSource,
+		},
 	}
 }
 
@@ -188,9 +197,16 @@ func checkSSHDirective(
 		ControlID:     controlID,
 		Title:         title,
 		Status:        status,
+		Applicability: ApplicabilityApplicable,
 		Severity:      severity,
 		CurrentValue:  current,
 		ExpectedValue: expected,
 		Message:       message,
+		Source:        sshConfigSource,
+		Evidence: []Evidence{{
+			Name:   directive,
+			Value:  current,
+			Source: sshConfigSource,
+		}},
 	}
 }

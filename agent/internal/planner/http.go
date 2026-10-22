@@ -13,15 +13,18 @@ func HTTPHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	findings := assessment.AssessSSHControls()
-	plan := BuildSSHPlan(findings)
+	assessmentResult := assessment.Assessment{
+		Platform: assessment.PlatformUbuntu,
+		Findings: assessment.AssessSSHControls(),
+	}
+	plan := BuildAssessmentPlan(assessmentResult)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"platform": "ubuntu",
-		"findings": findings,
+		"platform": assessmentResult.Platform,
+		"findings": assessmentResult.Findings,
 		"plan":     plan,
 	})
 }
