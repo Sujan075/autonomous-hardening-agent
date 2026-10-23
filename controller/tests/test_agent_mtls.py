@@ -1,14 +1,20 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import os
 from pathlib import Path
+import socket
 import ssl
+import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
 import httpx
+from fastapi.testclient import TestClient
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import PublicFormat
@@ -22,13 +28,19 @@ from app.agents.identity import (
     bind_target_to_agent, create_pending_agent,
 )
 from app.agents.mtls import AgentTransportError, TLSSettings, make_verified_agent_client
+from app.auth.oidc import Principal, require_target_read
 from app.assessments.provenance import (
     ObservationTrustState,
     SupportedBindingVersions,
     resolve_assessment_observation,
     store_assessment_observation,
 )
-from app.db.models import AssessmentObservation, AssessmentObservationTrust, Base, Target, TargetAgentBinding
+from app.db.database import get_db
+from app.db.models import AssessmentObservation, AssessmentObservationTrust, Base, SecurityAuditEvent, Target, TargetAgentBinding
+from app.main import app
+from app.policies.registry import assign_policy_to_target, register_definition
+from app.policies.review import review_policy_definition
+from app.policies.trust import PolicyTrustPin
 
 
 def issue_ca():
@@ -153,13 +165,18 @@ class AgentMTLSTests(unittest.TestCase):
             "CONTROLLER_WORKLOAD_IDENTITY": controller_uri or self.controller_uri,
         }, clear=True)
 
-    def serve(self, cert_pair=None, ca_path=None, body=b'{"status":"online"}'):
+    def serve(self, cert_pair=None, ca_path=None, body=b'{"status":"online"}', delay=0):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
+                if delay:
+                    time.sleep(delay)
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except BrokenPipeError:
+                    pass
 
             def log_message(self, *_args):
                 pass
@@ -319,6 +336,16 @@ class AgentMTLSTests(unittest.TestCase):
                 client.get(url + "/status", timeout=3)
             self.assertEqual(self.db.scalar(select(AssessmentObservation)), None)
 
+    def test_expired_registered_agent_credential_fails_after_tls_verification(self):
+        with self.settings():
+            url = self.serve()
+            client = make_verified_agent_client(self.db, target=self.target, base_url=url)
+            self.addCleanup(client.close)
+            self.credential.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            self.db.commit()
+            with self.assertRaises(AgentTransportError):
+                client.get(url + "/status", timeout=3)
+
     def test_binding_replacement_during_request_rejects_old_peer_before_body_use(self):
         with self.settings():
             url = self.serve()
@@ -349,6 +376,178 @@ class AgentMTLSTests(unittest.TestCase):
         with patch.dict("os.environ", {"CONTROLLER_AGENT_CA_FILE": "only-ca.pem"}, clear=True):
             with self.assertRaises(AgentTransportError):
                 TLSSettings.from_env()
+
+    def test_verified_https_timeout_fails_without_downgrade(self):
+        with self.settings():
+            url = self.serve(delay=0.5)
+            client = make_verified_agent_client(self.db, target=self.target, base_url=url)
+            self.addCleanup(client.close)
+            with self.assertRaises(httpx.ReadTimeout):
+                client.get(url + "/status", timeout=0.1)
+
+    def test_actual_go_agent_process_mtls_and_unsupported_host_assessment_denial(self):
+        repository = Path(__file__).resolve().parents[2]
+        executable = self.root / "agent-process"
+        built = subprocess.run(
+            ["go", "build", "-o", str(executable), "./cmd/agent"],
+            cwd=repository / "agent",
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual(built.returncode, 0, built.stderr)
+
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        environment = os.environ.copy()
+        environment.pop("AGENT_EXECUTION_TOKEN", None)
+        environment.update({
+            "AGENT_ID": "tls-agent",
+            "AGENT_HOST": "127.0.0.1",
+            "AGENT_PORT": str(port),
+            "AGENT_TLS_CERT_FILE": str(self.server_pair[0]),
+            "AGENT_TLS_KEY_FILE": str(self.server_pair[1]),
+            "AGENT_TLS_CLIENT_CA_FILE": str(self.ca_path),
+            "AGENT_TLS_CONTROLLER_IDENTITY": self.controller_uri,
+        })
+        process = subprocess.Popen(
+            [str(executable)], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        self.addCleanup(self._stop_process, process)
+        base_url = f"https://localhost:{port}"
+
+        with self.settings():
+            client = make_verified_agent_client(self.db, target=self.target, base_url=base_url)
+            self.addCleanup(client.close)
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    status = client.get(base_url + "/status", timeout=1)
+                    break
+                except httpx.ConnectError:
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        self.fail("actual Go agent did not start its mTLS listener")
+                    time.sleep(0.05)
+            self.assertEqual(status.json(), {"agent_id": "tls-agent", "status": "online"})
+            self.assertIsNotNone(client.authenticated_peer)
+            self.assertEqual(client.authenticated_peer.agent_id, "tls-agent")
+            discovery_response = client.get(base_url + "/discovery", timeout=3)
+            discovery = discovery_response.json()
+            self.assertIn(discovery["os"], {"darwin", "linux", "windows", "freebsd", "openbsd", "netbsd"})
+            self.assertTrue(discovery["architecture"])
+            for route in ("execute", "rollback"):
+                denied = client.get(base_url + f"/{route}", timeout=3)
+                self.assertEqual(denied.status_code, 404)
+                with client.stream("POST", base_url + f"/{route}", timeout=3) as denied_post:
+                    self.assertEqual(denied_post.status_code, 404)
+
+            # The real listener requires a trusted Controller client cert and
+            # checks its workload URI, in addition to the Controller's own
+            # normal server-chain/hostname and active binding checks.
+            no_identity_context = ssl.create_default_context(cafile=str(self.ca_path))
+            with httpx.Client(verify=no_identity_context, trust_env=False, timeout=3) as anonymous:
+                with self.assertRaises(httpx.HTTPError):
+                    anonymous.get(base_url + "/status")
+            wrong_identity_context = ssl.create_default_context(cafile=str(self.ca_path))
+            wrong_identity_context.load_cert_chain(*map(str, self.wrong_client_pair))
+            with httpx.Client(verify=wrong_identity_context, trust_env=False, timeout=3) as wrong_identity:
+                with self.assertRaises(httpx.HTTPError):
+                    wrong_identity.get(base_url + "/status")
+            rogue_ca, rogue_ca_key = issue_ca()
+            rogue_controller, rogue_controller_key = issue_leaf(
+                rogue_ca, rogue_ca_key, self.controller_uri, client=True
+            )
+            rogue_pair = write_pair(self.root, "rogue-controller", rogue_controller, rogue_controller_key)
+            untrusted_context = ssl.create_default_context(cafile=str(self.ca_path))
+            untrusted_context.load_cert_chain(*map(str, rogue_pair))
+            with httpx.Client(verify=untrusted_context, trust_env=False, timeout=3) as untrusted:
+                with self.assertRaises(httpx.HTTPError):
+                    untrusted.get(base_url + "/status")
+
+            # Use a test-only policy that is deliberately incompatible with
+            # the agent's real host result. The route must emit a sanitized
+            # denial rather than manufacture Ubuntu evidence.
+            policy_definition = {
+                "schema": "aha-agent-assessment-policy/v1",
+                "platform": "ubuntu",
+                "os_version": "Ubuntu 24.04.5 LTS",
+                "architecture": "arm64",
+                "controls": [{"control_id": "TEST-ONLY-NO-MATCH", "expected_value": "fixture"}],
+            }
+            policy = register_definition(
+                self.db,
+                platform="ubuntu",
+                policy_version="process-test-v1",
+                catalog_version="process-test-catalog-v1",
+                definition=policy_definition,
+                provenance_reference="test-only:actual-go-process",
+            )
+            pin = PolicyTrustPin(
+                provenance_reference=policy.provenance_reference,
+                source_evidence_sha256="sha256:" + "e" * 64,
+                definition_sha256=policy.definition_sha256,
+                platform=policy.platform,
+                policy_version=policy.policy_version,
+                catalog_version=policy.catalog_version,
+                applicability_confirmed=True,
+            )
+            trust_pins = [{
+                "provenance_reference": pin.provenance_reference,
+                "source_evidence_sha256": pin.source_evidence_sha256,
+                "definition_sha256": pin.definition_sha256,
+                "platform": pin.platform,
+                "policy_version": pin.policy_version,
+                "catalog_version": pin.catalog_version,
+                "applicability_confirmed": True,
+            }]
+            os.environ["POLICY_REVIEW_TRUST_PINS_JSON"] = json.dumps(trust_pins)
+            reviewer = Principal("https://reviewer.example.test", "test-reviewer", frozenset({"policy-reviewer"}))
+            review_policy_definition(
+                self.db,
+                definition_id=policy.id,
+                decision="approved",
+                rationale="process integration test fixture only",
+                source_evidence_sha256=pin.source_evidence_sha256,
+                reviewer=reviewer,
+                trust_pins=(pin,),
+            )
+            assign_policy_to_target(self.db, target_id=self.target.id, definition_id=policy.id)
+
+            requester = Principal("https://identity.example.test", "process-test-reader", frozenset({"target-reader"}))
+            app.dependency_overrides[get_db] = lambda: self.db
+            app.dependency_overrides[require_target_read] = lambda: requester
+            self.addCleanup(app.dependency_overrides.clear)
+            with patch.dict(os.environ, {
+                "AGENT_STATUS_URL_OVERRIDES": json.dumps({self.target.id: base_url}),
+                "POLICY_REVIEW_TRUST_PINS_JSON": json.dumps(trust_pins),
+            }, clear=False):
+                response = TestClient(app).get(
+                    f"/api/targets/{self.target.id}/assessment"
+                )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(
+                self.db.query(AssessmentObservation).count(), 0,
+                "incompatible real host must not create an assessment observation",
+            )
+            failures = self.db.query(SecurityAuditEvent).filter_by(event_type="assessment.failed").all()
+            self.assertEqual(len(failures), 1)
+            metadata = json.loads(failures[0].metadata_json)
+            self.assertEqual(metadata, {"outcome": "failed", "reason_code": "policy_or_result_rejected"})
+            serialized_events = "".join(row.metadata_json for row in self.db.query(SecurityAuditEvent).all())
+            for sensitive in ("private key", "bootstrap_token", "authorization", "credential"):
+                self.assertNotIn(sensitive, serialized_events.lower())
+
+    @staticmethod
+    def _stop_process(process):
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,10 @@ from app.approvals.bindings import MAX_ASSESSMENT_JSON_BYTES
 
 
 TARGET_ID = "8865f49b-d545-4a8a-8511-766eaedea892"
+DISCOVERY = {
+    "hostname": "agent-test", "os": "linux", "os_version": "Ubuntu 24.04.5 LTS",
+    "kernel": "test-kernel", "architecture": "arm64", "primary_ip": "127.0.0.1",
+}
 TARGET = Target(
     id=TARGET_ID,
     name="Ubuntu lab",
@@ -95,12 +99,17 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
                 "message": "disable root login", "source": "sshd",
             }],
         }
+        discovery_response = httpx.Response(
+            200,
+            json=DISCOVERY,
+            request=httpx.Request("GET", "http://127.0.0.1:19000/discovery"),
+        )
         upstream_response = httpx.Response(
             200,
             json=payload,
             request=httpx.Request("GET", "http://127.0.0.1:19000/assessment"),
         )
-        mock_stream.return_value = nullcontext(upstream_response)
+        mock_stream.side_effect = [nullcontext(discovery_response), nullcontext(upstream_response)]
         mock_store.return_value = SimpleNamespace(
             observation_id="observation-controller-1",
             trust_status="controller_observed_unauthenticated",
@@ -144,12 +153,17 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
     def test_assessment_storage_failure_is_not_reported_as_success(
         self, mock_store: Mock, mock_stream: Mock
     ) -> None:
+        discovery_response = httpx.Response(
+            200,
+            json=DISCOVERY,
+            request=httpx.Request("GET", "http://127.0.0.1:19000/discovery"),
+        )
         upstream_response = httpx.Response(
             200,
             json={"platform": "ubuntu", "findings": []},
             request=httpx.Request("GET", "http://127.0.0.1:19000/assessment"),
         )
-        mock_stream.return_value = nullcontext(upstream_response)
+        mock_stream.side_effect = [nullcontext(discovery_response), nullcontext(upstream_response)]
         mock_store.side_effect = ObservationStorageUnavailable("offline")
 
         response = self.client.get(f"/api/targets/{TARGET_ID}/assessment")
@@ -164,12 +178,17 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
     def test_oversized_agent_assessment_is_rejected_before_storage(
         self, mock_store: Mock, mock_stream: Mock
     ) -> None:
+        discovery_response = httpx.Response(
+            200,
+            json=DISCOVERY,
+            request=httpx.Request("GET", "http://127.0.0.1:19000/discovery"),
+        )
         upstream_response = httpx.Response(
             200,
             content=b" " * (MAX_ASSESSMENT_JSON_BYTES + 1),
             request=httpx.Request("GET", "http://127.0.0.1:19000/assessment"),
         )
-        mock_stream.return_value = nullcontext(upstream_response)
+        mock_stream.side_effect = [nullcontext(discovery_response), nullcontext(upstream_response)]
 
         response = self.client.get(f"/api/targets/{TARGET_ID}/assessment")
 
