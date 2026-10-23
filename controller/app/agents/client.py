@@ -2,11 +2,15 @@ from dataclasses import dataclass
 import ipaddress
 import json
 import os
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 import httpx
 
 from app.approvals.bindings import MAX_ASSESSMENT_JSON_BYTES
+from app.agents.mtls import AgentTransportError, VerifiedAgentClient, make_verified_agent_client
+from app.db.models import Target
+from sqlalchemy.orm import Session
 
 
 @dataclass(frozen=True)
@@ -79,7 +83,15 @@ def resolve_agent_status_url(
     """Resolve an agent base URL; legacy remote HTTP is unsuitable for privileged operations."""
     raw = os.environ.get("AGENT_STATUS_URL_OVERRIDES") if overrides_json is None else overrides_json
     if raw is None:
-        return f"http://{address}:9000"
+        try:
+            if ipaddress.ip_address(address).is_loopback:
+                return f"http://{address}:9000"
+        except ValueError:
+            if address.lower() == "localhost":
+                return f"http://{address}:9000"
+        raise AgentStatusURLConfigurationError(
+            "non-loopback agents require an explicit HTTPS mTLS URL"
+        )
 
     try:
         overrides = json.loads(raw)
@@ -97,25 +109,48 @@ def resolve_agent_status_url(
         key: _validate_status_url(key, value) for key, value in overrides.items()
     }
     if target_id not in validated_overrides:
-        return f"http://{address}:9000"
+        try:
+            if ipaddress.ip_address(address).is_loopback:
+                return f"http://{address}:9000"
+        except ValueError:
+            if address.lower() == "localhost":
+                return f"http://{address}:9000"
+        raise AgentStatusURLConfigurationError(
+            "non-loopback agents require an explicit HTTPS mTLS URL"
+        )
     return validated_overrides[target_id]
 
 
-def get_agent_status(base_url: str, timeout: float = 5.0) -> AgentStatus:
-    """Read /status only. The legacy remote-HTTP fallback is not suitable for privileged operations."""
-    url = f"{base_url.rstrip('/')}/status"
+@contextmanager
+def target_agent_transport(db: Session, target: Target, base_url: str):
+    transport = make_verified_agent_client(db, target=target, base_url=base_url)
+    try:
+        yield transport
+    finally:
+        if transport is not None:
+            transport.close()
+
+
+def get_agent_status(
+    base_url: str, timeout: float = 5.0, transport: VerifiedAgentClient | None = None
+) -> AgentStatus:
+    """Read /status only using bounded JSON and an optional verified mTLS client."""
 
     try:
-        response = httpx.get(url, timeout=timeout)
-        response.raise_for_status()
-
-        payload = response.json()
+        payload = get_agent_read_only_payload(
+            base_url, "status", timeout=timeout, transport=transport
+        )
+        if not isinstance(payload, dict):
+            raise ValueError("agent status response must be an object")
 
         return AgentStatus(
             reachable=True,
             agent_id=payload.get("agent_id"),
             status=payload.get("status"),
         )
+
+    except AgentTransportError:
+        raise
 
     except httpx.HTTPError as exc:
         return AgentStatus(
@@ -134,23 +169,27 @@ def get_agent_read_only_payload(
     base_url: str,
     endpoint: str,
     timeout: float = 5.0,
+    transport: VerifiedAgentClient | None = None,
 ) -> object:
     """Fetch JSON from a read-only agent endpoint using a finite timeout."""
-    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
-    response = httpx.get(url, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
+    raw = get_agent_read_only_bytes(base_url, endpoint, timeout, transport)
+    try:
+        return json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("agent response is not valid UTF-8 JSON") from exc
 
 
 def get_agent_read_only_bytes(
     base_url: str,
     endpoint: str,
     timeout: float = 5.0,
+    transport: VerifiedAgentClient | None = None,
 ) -> bytes:
     """Fetch the exact UTF-8 response body for validation and provenance storage."""
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     body = bytearray()
-    with httpx.stream("GET", url, timeout=timeout) as response:
+    stream = transport.stream if transport else httpx.stream
+    with stream("GET", url, timeout=timeout) as response:
         response.raise_for_status()
         for chunk in response.iter_bytes():
             if len(body) + len(chunk) > MAX_ASSESSMENT_JSON_BYTES:

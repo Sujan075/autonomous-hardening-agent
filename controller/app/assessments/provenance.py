@@ -26,7 +26,18 @@ from app.approvals.bindings import (
     evidence_digest,
     parse_assessment_json,
 )
-from app.db.models import AssessmentObservation, AssessmentObservationTrust, Target
+from app.agents.mtls import AuthenticatedAgentPeer, is_verified_agent_peer
+from app.db.models import (
+    AgentCredential,
+    AgentCredentialState,
+    AgentIdentity,
+    AgentIdentityState,
+    AssessmentObservation,
+    AssessmentObservationTrust,
+    Target,
+    TargetAgentBinding,
+)
+from app.policies.registry import RegistryError, resolve_target_assignment
 
 
 PAYLOAD_SCHEMA_VERSION = "agent-assessment-json/v1"
@@ -86,13 +97,15 @@ def store_assessment_observation(
     policy_version: str | None = None,
     catalog_version: str | None = None,
     reported_agent_id: str | None = None,
+    authenticated_peer: AuthenticatedAgentPeer | None = None,
     collected_at: datetime | None = None,
 ) -> AssessmentObservation:
     """Validate and append an agent response under Controller target context.
 
     Trust status is assigned here, never accepted from the caller or payload.
-    The current HTTP path cannot establish agent identity, so every collected
-    record remains explicitly unauthenticated.
+    A verified mTLS peer can establish channel identity only when it still
+    matches the Controller's active target binding. This does not establish
+    assessment provenance or approval authorization.
     """
     try:
         if not isinstance(target, Target):
@@ -102,6 +115,15 @@ def store_assessment_observation(
             raise ObservationRejected("assessment target is not a persisted Controller target")
         target_context = ControllerTargetContext.from_target(persisted_target)
         target_context.validate()
+        when = _normalize_datetime(collected_at or datetime.now(timezone.utc))
+        active_binding = _current_binding(db, target_context.target_id, datetime.now(timezone.utc))
+        if active_binding is not None:
+            target_context = ControllerTargetContext(
+                target_id=target_context.target_id,
+                platform=target_context.platform,
+                binding_generation=active_binding.generation,
+                agent_id=active_binding.agent_id,
+            )
         assessment = parse_assessment_json(raw_payload)
         if assessment.platform != target_context.platform:
             raise ObservationRejected("assessment platform does not match Controller target")
@@ -110,7 +132,34 @@ def store_assessment_observation(
         _required_source(collection_source)
         if reported_agent_id is not None:
             _optional_version(reported_agent_id, "reported agent ID")
-        when = _normalize_datetime(collected_at or datetime.now(timezone.utc))
+        trust_status = AssessmentObservationTrust.CONTROLLER_OBSERVED_UNAUTHENTICATED.value
+        authenticated_agent_id = None
+        authenticated_fingerprint = None
+        if authenticated_peer is not None:
+            if (
+                not is_verified_agent_peer(authenticated_peer)
+                or active_binding is None
+                or authenticated_peer.target_id != target_context.target_id
+                or authenticated_peer.agent_id != active_binding.agent_id
+                or authenticated_peer.binding_generation != active_binding.generation
+                or authenticated_peer.credential_id != active_binding.credential_id
+            ):
+                raise ObservationRejected("authenticated peer does not match the current target binding")
+            credential = db.get(AgentCredential, authenticated_peer.credential_id)
+            if (
+                credential is None
+                or credential.agent_id != active_binding.agent_id
+                or credential.state != AgentCredentialState.ACTIVE.value
+                or credential.revoked_at is not None
+                or credential.fingerprint_sha256 != authenticated_peer.certificate_fingerprint
+                or credential.identity_uri != authenticated_peer.identity_uri
+                or datetime.now(timezone.utc) < _normalize_datetime(credential.not_before)
+                or datetime.now(timezone.utc) >= _normalize_datetime(credential.expires_at)
+            ):
+                raise ObservationRejected("authenticated peer credential is no longer active")
+            authenticated_agent_id = active_binding.agent_id
+            authenticated_fingerprint = credential.fingerprint_sha256
+            trust_status = AssessmentObservationTrust.AUTHENTICATED_AGENT_TARGET_BOUND.value
         raw_bytes = _utf8_bytes(raw_payload)
         row = AssessmentObservation(
             target_id=target_context.target_id,
@@ -123,8 +172,13 @@ def store_assessment_observation(
             payload_sha256=_payload_digest(raw_bytes),
             collection_source=collection_source,
             reported_agent_id=reported_agent_id,
-            target_binding_generation=target_context.binding_generation,
-            trust_status=AssessmentObservationTrust.CONTROLLER_OBSERVED_UNAUTHENTICATED.value,
+            authenticated_agent_id=authenticated_agent_id,
+            authenticated_credential_fingerprint=authenticated_fingerprint,
+            target_binding_generation=(
+                target_context.binding_generation
+                or (active_binding.generation if active_binding is not None else None)
+            ),
+            trust_status=trust_status,
         )
         db.add(row)
         db.commit()
@@ -162,6 +216,14 @@ def resolve_assessment_observation(
             raise ObservationRejected("target is not a persisted Controller target")
         target_context = ControllerTargetContext.from_target(persisted_target)
         target_context.validate()
+        active_binding = _current_binding(db, target_context.target_id, now)
+        if active_binding is not None:
+            target_context = ControllerTargetContext(
+                target_id=target_context.target_id,
+                platform=target_context.platform,
+                binding_generation=active_binding.generation,
+                agent_id=active_binding.agent_id,
+            )
         row = db.scalar(
             select(AssessmentObservation).where(
                 AssessmentObservation.observation_id == observation_id
@@ -175,7 +237,10 @@ def resolve_assessment_observation(
             raise ObservationRejected("assessment platform does not match current target")
         if row.payload_schema_version != PAYLOAD_SCHEMA_VERSION:
             raise ObservationRejected("assessment payload schema version is unsupported")
-        if row.trust_status != AssessmentObservationTrust.CONTROLLER_OBSERVED_UNAUTHENTICATED.value:
+        if row.trust_status not in {
+            AssessmentObservationTrust.CONTROLLER_OBSERVED_UNAUTHENTICATED.value,
+            AssessmentObservationTrust.AUTHENTICATED_AGENT_TARGET_BOUND.value,
+        }:
             raise ObservationRejected("assessment trust status is unsupported")
 
         raw_bytes = _utf8_bytes(row.assessment_json)
@@ -195,11 +260,29 @@ def resolve_assessment_observation(
         age = current_time - observed_at
         if age < timedelta(0) or age > max_age:
             raise ObservationRejected("assessment observation is future-dated or stale")
-        if (
-            target_context.binding_generation is not None
-            and row.target_binding_generation != target_context.binding_generation
-        ):
+        current_generation = target_context.binding_generation or (
+            active_binding.generation if active_binding is not None else None
+        )
+        if row.target_binding_generation != current_generation:
             raise ObservationRejected("assessment observation belongs to a replaced target binding")
+        observation_state = ObservationTrustState(row.trust_status)
+        if observation_state == ObservationTrustState.AUTHENTICATED_AGENT_TARGET_BOUND:
+            if (
+                active_binding is None
+                or row.authenticated_agent_id != active_binding.agent_id
+                or row.authenticated_credential_fingerprint is None
+            ):
+                raise ObservationRejected("authenticated observation no longer matches the active binding")
+            credential = db.scalar(
+                select(AgentCredential).where(
+                    AgentCredential.agent_id == active_binding.agent_id,
+                    AgentCredential.fingerprint_sha256 == row.authenticated_credential_fingerprint,
+                    AgentCredential.state == AgentCredentialState.ACTIVE.value,
+                    AgentCredential.revoked_at.is_(None),
+                )
+            )
+            if credential is None or credential.id != active_binding.credential_id:
+                raise ObservationRejected("authenticated observation credential is no longer active")
         if require_latest:
             latest = db.scalar(
                 select(AssessmentObservation)
@@ -220,7 +303,7 @@ def resolve_assessment_observation(
             return ResolvedAssessmentObservation(
                 observation_id=row.observation_id,
                 target_id=target_context.target_id,
-                observation_state=ObservationTrustState.CONTROLLER_OBSERVED_UNAUTHENTICATED,
+                observation_state=observation_state,
                 approval_state=ObservationTrustState.UNRESOLVED_UNTRUSTED,
                 assessment=assessment,
                 evidence_digest=None,
@@ -244,18 +327,66 @@ def resolve_assessment_observation(
         return ResolvedAssessmentObservation(
             observation_id=row.observation_id,
             target_id=target_context.target_id,
-            observation_state=ObservationTrustState.CONTROLLER_OBSERVED_UNAUTHENTICATED,
+            observation_state=observation_state,
             approval_state=ObservationTrustState.UNRESOLVED_UNTRUSTED,
             assessment=assessment,
             evidence_digest=digest,
             assessment_record=record,
-            unresolved_reason="authenticated agent identity and target binding are not implemented",
+            unresolved_reason=(
+                "authenticated agent identity is channel-bound, but authenticated transport "
+                "does not establish assessment provenance or approval authorization"
+            ),
         )
     except SQLAlchemyError as exc:
         db.rollback()
         raise ObservationStorageUnavailable("assessment observation storage is unavailable") from exc
     except BindingValidationError as exc:
         raise ObservationRejected("assessment provenance is invalid") from exc
+
+
+def resolve_assigned_assessment_observation(
+    db: Session,
+    *,
+    observation_id: str,
+    target: Target,
+    now: datetime,
+    max_age: timedelta,
+) -> ResolvedAssessmentObservation:
+    """Resolve evidence using versions assigned by Controller-owned records.
+
+    No agent-supplied version string participates in this path. Missing or
+    unverified assignment remains unresolved and cannot produce an evidence
+    digest or approval context.
+    """
+    try:
+        assignment = resolve_target_assignment(db, target_id=target.id)
+    except RegistryError:
+        return resolve_assessment_observation(
+            db,
+            observation_id=observation_id,
+            target=target,
+            now=now,
+            max_age=max_age,
+            versions=SupportedBindingVersions(),
+            expected_policy_version=None,
+            expected_catalog_version=None,
+        )
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise ObservationStorageUnavailable("assessment observation storage is unavailable") from exc
+    return resolve_assessment_observation(
+        db,
+        observation_id=observation_id,
+        target=target,
+        now=now,
+        max_age=max_age,
+        versions=SupportedBindingVersions(
+            frozenset({assignment.policy_version}),
+            frozenset({assignment.catalog_version}),
+        ),
+        expected_policy_version=assignment.policy_version,
+        expected_catalog_version=assignment.catalog_version,
+    )
 
 
 def _version_gap_or_reject(
@@ -281,6 +412,32 @@ def _version_gap_or_reject(
 
 def _payload_digest(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _current_binding(db: Session, target_id: str, now: datetime) -> TargetAgentBinding | None:
+    binding = db.scalar(
+        select(TargetAgentBinding).where(
+            TargetAgentBinding.target_id == target_id,
+            TargetAgentBinding.state == "active",
+        )
+    )
+    if binding is None:
+        return None
+    identity = db.get(AgentIdentity, binding.agent_id)
+    credential = db.get(AgentCredential, binding.credential_id)
+    current = _normalize_datetime(now)
+    if (
+        identity is None
+        or identity.state != AgentIdentityState.ACTIVE.value
+        or credential is None
+        or credential.agent_id != binding.agent_id
+        or credential.state != AgentCredentialState.ACTIVE.value
+        or credential.revoked_at is not None
+        or current < _normalize_datetime(credential.not_before)
+        or current >= _normalize_datetime(credential.expires_at)
+    ):
+        return None
+    return binding
 
 
 def _utf8_bytes(raw: str | bytes) -> bytes:

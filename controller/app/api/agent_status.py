@@ -11,7 +11,9 @@ from app.agents.client import (
     get_agent_read_only_payload,
     get_agent_status,
     resolve_agent_status_url,
+    target_agent_transport,
 )
+from app.agents.mtls import AgentTransportError
 from app.assessments.provenance import (
     ObservationStorageUnavailable,
     store_assessment_observation,
@@ -48,7 +50,12 @@ def agent_status(
     db: Session = Depends(get_db),
 ) -> dict:
     target = _get_target(target_id, db)
-    result = get_agent_status(_get_agent_base_url(target))
+    base_url = _get_agent_base_url(target)
+    try:
+        with target_agent_transport(db, target, base_url) as transport:
+            result = get_agent_status(base_url, transport=transport)
+    except AgentTransportError as exc:
+        raise HTTPException(status_code=502, detail="Agent transport identity validation failed") from exc
 
     return {
         "target_id": target.id,
@@ -66,7 +73,8 @@ def _proxy_agent_json(target_id: str, db: Session, endpoint: str, payload_name: 
     target = _get_target(target_id, db)
     base_url = _get_agent_base_url(target)
     try:
-        payload = get_agent_read_only_payload(base_url, endpoint)
+        with target_agent_transport(db, target, base_url) as transport:
+            payload = get_agent_read_only_payload(base_url, endpoint, transport=transport)
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(
             status_code=502,
@@ -85,14 +93,19 @@ def assessment(target_id: str, db: Session = Depends(get_db)) -> dict:
     target = _get_target(target_id, db)
     base_url = _get_agent_base_url(target)
     try:
-        raw_payload = get_agent_read_only_bytes(base_url, "assessment")
+        with target_agent_transport(db, target, base_url) as transport:
+            raw_payload = get_agent_read_only_bytes(base_url, "assessment", transport=transport)
+            authenticated_peer = transport.authenticated_peer if transport is not None else None
         observation = store_assessment_observation(
             db,
             target=target,
             raw_payload=raw_payload,
-            # There is no Controller-owned policy/catalog registry yet.
+            # The assessment response does not identify an authoritative
+            # registry assignment; resolution remains unresolved until supplied
+            # by Controller-owned policy configuration.
             policy_version=None,
             catalog_version=None,
+            authenticated_peer=authenticated_peer,
         )
         payload = json.loads(raw_payload.decode("utf-8", errors="strict"))
     except ObservationStorageUnavailable as exc:

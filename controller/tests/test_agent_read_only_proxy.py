@@ -37,6 +37,22 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
     def tearDown(self) -> None:
         app.dependency_overrides.clear()
 
+    def test_no_controller_execute_or_rollback_routes_exist(self) -> None:
+        def collect(routes):
+            paths = set()
+            for route in routes:
+                path = getattr(route, "path", None)
+                if path is not None:
+                    paths.add(path)
+                nested = getattr(route, "routes", None)
+                if nested:
+                    paths.update(collect(nested))
+            return paths
+
+        paths = collect(app.routes)
+        self.assertNotIn("/api/targets/{target_id}/execute", paths)
+        self.assertNotIn("/api/targets/{target_id}/rollback", paths)
+
     @patch.dict("os.environ", {"AGENT_STATUS_URL_OVERRIDES": json.dumps({TARGET_ID: "http://127.0.0.1:19000"})})
     @patch("app.agents.client.httpx.stream")
     @patch("app.api.agent_status.store_assessment_observation")
@@ -117,14 +133,14 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
         mock_store.assert_not_called()
 
     @patch.dict("os.environ", {"AGENT_STATUS_URL_OVERRIDES": json.dumps({TARGET_ID: "http://127.0.0.1:19000"})})
-    @patch("app.agents.client.httpx.get")
-    def test_plan_uses_override_and_returns_named_payload(self, mock_get: Mock) -> None:
+    @patch("app.agents.client.httpx.stream")
+    def test_plan_uses_override_and_returns_named_payload(self, mock_stream: Mock) -> None:
         payload = {"steps": [{"action": "disable-service", "args": {"name": "telnet"}}]}
-        mock_get.return_value = httpx.Response(
+        mock_stream.return_value = nullcontext(httpx.Response(
             200,
             json=payload,
             request=httpx.Request("GET", "http://127.0.0.1:19000/plan"),
-        )
+        ))
 
         response = self.client.get(f"/api/targets/{TARGET_ID}/plan")
 
@@ -134,19 +150,19 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
             "target_name": "Ubuntu lab",
             "plan": payload,
         })
-        mock_get.assert_called_once_with("http://127.0.0.1:19000/plan", timeout=5.0)
+        mock_stream.assert_called_once_with("GET", "http://127.0.0.1:19000/plan", timeout=5.0)
 
-    @patch("app.agents.client.httpx.get")
-    def test_unknown_target_returns_404_without_request(self, mock_get: Mock) -> None:
+    @patch("app.agents.client.httpx.stream")
+    def test_unknown_target_returns_404_without_request(self, mock_stream: Mock) -> None:
         self.db.scalar.return_value = None
 
         response = self.client.get(f"/api/targets/{TARGET_ID}/assessment")
 
         self.assertEqual(response.status_code, 404)
-        mock_get.assert_not_called()
+        mock_stream.assert_not_called()
 
-    @patch("app.agents.client.httpx.get")
-    def test_missing_agent_address_returns_400_without_request(self, mock_get: Mock) -> None:
+    @patch("app.agents.client.httpx.stream")
+    def test_missing_agent_address_returns_400_without_request(self, mock_stream: Mock) -> None:
         self.db.scalar.return_value = SimpleNamespace(
             id=TARGET_ID, name="Ubuntu lab", address=None
         )
@@ -154,39 +170,39 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
         response = self.client.get(f"/api/targets/{TARGET_ID}/plan")
 
         self.assertEqual(response.status_code, 400)
-        mock_get.assert_not_called()
+        mock_stream.assert_not_called()
 
     @patch.dict("os.environ", {"AGENT_STATUS_URL_OVERRIDES": "{"})
-    @patch("app.agents.client.httpx.get")
-    def test_invalid_override_returns_error_without_request(self, mock_get: Mock) -> None:
+    @patch("app.agents.client.httpx.stream")
+    def test_invalid_override_returns_error_without_request(self, mock_stream: Mock) -> None:
         response = self.client.get(f"/api/targets/{TARGET_ID}/plan")
 
         self.assertEqual(response.status_code, 500)
-        mock_get.assert_not_called()
+        mock_stream.assert_not_called()
 
-    @patch.dict("os.environ", {}, clear=True)
-    @patch("app.agents.client.httpx.get")
+    @patch.dict(
+        "os.environ",
+        {"AGENT_STATUS_URL_OVERRIDES": json.dumps({TARGET_ID: "http://127.0.0.1:19000"})},
+        clear=True,
+    )
     @patch("app.agents.client.httpx.stream")
-    def test_upstream_connection_and_invalid_json_return_502(
-        self, mock_stream: Mock, mock_get: Mock
-    ) -> None:
+    def test_upstream_connection_and_invalid_json_return_502(self, mock_stream: Mock) -> None:
         mock_stream.side_effect = httpx.ConnectTimeout("timed out")
         failed = self.client.get(f"/api/targets/{TARGET_ID}/assessment")
         self.assertEqual(failed.status_code, 502)
         mock_stream.assert_called_once_with(
-            "GET", "http://192.0.2.10:9000/assessment", timeout=5.0
+            "GET", "http://127.0.0.1:19000/assessment", timeout=5.0
         )
 
-        mock_get.reset_mock()
         mock_stream.reset_mock()
-        mock_get.return_value = httpx.Response(
+        mock_stream.return_value = nullcontext(httpx.Response(
             200,
             content=b"not-json",
-            request=httpx.Request("GET", "http://192.0.2.10:9000/plan"),
-        )
+            request=httpx.Request("GET", "http://127.0.0.1:19000/plan"),
+        ))
         invalid_json = self.client.get(f"/api/targets/{TARGET_ID}/plan")
         self.assertEqual(invalid_json.status_code, 502)
-        mock_get.assert_called_once_with("http://192.0.2.10:9000/plan", timeout=5.0)
+        mock_stream.assert_called_once_with("GET", "http://127.0.0.1:19000/plan", timeout=5.0)
 
 
 if __name__ == "__main__":
