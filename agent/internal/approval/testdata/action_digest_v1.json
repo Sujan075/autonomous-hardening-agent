@@ -1,0 +1,16 @@
+{
+  "version": "planner-action/v1",
+  "action": {
+    "action_id": "ACT-TEST-1",
+    "control_id": "CTL-01",
+    "title": "Disable “root” login",
+    "action_type": "set_sshd_option",
+    "current_value": "yes",
+    "desired_value": "no",
+    "risk_score": 3.5,
+    "execution_mode": "APPROVAL",
+    "reason": "Test vector: café"
+  },
+  "canonical_hex": "4148412d504c414e4e45522d414354494f4e2d44494745535400706c616e6e65722d616374696f6e2f7631000000000a4143542d544553542d310000000643544c2d30310000001844697361626c6520e2809c726f6f74e2809d206c6f67696e0000000f7365745f737368645f6f7074696f6e00000003796573000000026e6f400c00000000000000000008415050524f56414c000000125465737420766563746f723a20636166c3a9",
+  "sha256": "cf007f2f5001e49e5c3a909cdd1f07a8071676182458143f27b406626ac4efbd"
+}

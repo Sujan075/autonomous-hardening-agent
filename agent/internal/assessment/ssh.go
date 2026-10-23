@@ -1,97 +1,146 @@
 package assessment
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/catalog"
 )
 
-const sshdBinary = "/usr/sbin/sshd"
+const (
+	PlatformUbuntu  = string(catalog.PlatformUbuntu)
+	sshConfigSource = catalog.EffectiveSSHConfigSource
+	sudoBinary      = "/usr/bin/sudo"
+	sshdBinary      = "/usr/sbin/sshd"
+)
+
+type sshConfigRunner func() (stdout, stderr []byte, err error)
 
 func AssessSSHControls() []Finding {
-	config, err := readEffectiveSSHConfig()
-	if err != nil {
-		return []Finding{
-			{
-				ControlID:     "SSH-ASSESS-ERROR",
-				Title:         "Read effective SSH configuration",
-				Status:        StatusError,
-				Severity:      "HIGH",
-				CurrentValue:  "",
-				ExpectedValue: "Effective SSH configuration is readable",
-				Message:       err.Error(),
-			},
-		}
-	}
-
-	return []Finding{
-		checkSSHDirective(
-			config,
-			"5.1.19",
-			"Disable SSH empty passwords",
-			"PermitEmptyPasswords",
-			"no",
-			"MEDIUM",
-		),
-		checkSSHDirective(
-			config,
-			"5.1.20",
-			"Disable SSH root login",
-			"PermitRootLogin",
-			"no",
-			"HIGH",
-		),
-		checkSSHDirective(
-			config,
-			"5.1.21",
-			"Disable SSH user environment",
-			"PermitUserEnvironment",
-			"no",
-			"MEDIUM",
-		),
-		checkSSHDirective(
-			config,
-			"5.1.22",
-			"Enable SSH PAM",
-			"UsePAM",
-			"yes",
-			"MEDIUM",
-		),
-	}
+	return assessSSHControls(runEffectiveSSHConfig)
 }
 
-func readEffectiveSSHConfig() (map[string]string, error) {
-	output, err := exec.Command(sshdBinary, "-T").Output()
+func assessSSHControls(runner sshConfigRunner) []Finding {
+	controls := catalog.Controls(catalog.PlatformUbuntu)
+	if err := catalog.Validate(controls); err != nil {
+		return []Finding{sshAssessmentError(fmt.Errorf("invalid control catalog: %w", err))}
+	}
+
+	config, err := readEffectiveSSHConfig(runner)
 	if err != nil {
-		return nil, fmt.Errorf("failed to evaluate effective SSH configuration: %w", err)
+		return []Finding{sshAssessmentError(err)}
+	}
+
+	findings := make([]Finding, 0, len(controls))
+	for _, control := range controls {
+		findings = append(findings, checkSSHDirective(config, control))
+	}
+	return findings
+}
+
+func runEffectiveSSHConfig() ([]byte, []byte, error) {
+	command := exec.Command(sudoBinary, "-n", sshdBinary, "-T")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	stdout, err := command.Output()
+	return stdout, stderr.Bytes(), err
+}
+
+func readEffectiveSSHConfig(runner sshConfigRunner) (map[string]string, error) {
+	stdout, stderr, err := runner()
+	if err != nil {
+		diagnostic := sanitizeDiagnostic(stderr)
+		if diagnostic == "" {
+			return nil, fmt.Errorf("failed to evaluate effective SSH configuration: %w", err)
+		}
+		return nil, fmt.Errorf("failed to evaluate effective SSH configuration: %w (stderr: %s)", err, diagnostic)
+	}
+
+	config, err := parseEffectiveSSHConfig(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse effective SSH configuration: %w", err)
+	}
+	return config, nil
+}
+
+func parseEffectiveSSHConfig(output []byte) (map[string]string, error) {
+	controls := catalog.Controls(catalog.PlatformUbuntu)
+	requiredDirectives := make(map[string]struct{}, len(controls))
+	for _, control := range controls {
+		requiredDirectives[strings.ToLower(control.EffectiveSettingKey)] = struct{}{}
 	}
 
 	values := make(map[string]string)
-
-	for _, line := range strings.Split(string(output), "\n") {
+	for lineNumber, line := range strings.Split(string(output), "\n") {
 		fields := strings.Fields(line)
-
-		if len(fields) < 2 {
+		if len(fields) == 0 {
 			continue
 		}
 
 		key := strings.ToLower(fields[0])
-		value := strings.ToLower(fields[1])
+		if _, required := requiredDirectives[key]; !required {
+			continue
+		}
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("malformed %s directive on line %d", fields[0], lineNumber+1)
+		}
+		if _, exists := values[key]; exists {
+			return nil, fmt.Errorf("duplicate %s directive", fields[0])
+		}
+		values[key] = strings.ToLower(fields[1])
+	}
 
-		values[key] = value
+	missing := make([]string, 0)
+	for _, control := range controls {
+		directive := strings.ToLower(control.EffectiveSettingKey)
+		if _, exists := values[directive]; !exists {
+			missing = append(missing, directive)
+		}
+	}
+	if len(missing) != 0 {
+		return nil, fmt.Errorf("missing required directives: %s", strings.Join(missing, ", "))
 	}
 
 	return values, nil
 }
 
+func sanitizeDiagnostic(stderr []byte) string {
+	text := strings.ToValidUTF8(string(stderr), "�")
+	diagnostic := strings.Join(strings.Fields(text), " ")
+	const maxDiagnosticRunes = 1024
+	runes := []rune(diagnostic)
+	if len(runes) > maxDiagnosticRunes {
+		return string(runes[:maxDiagnosticRunes]) + "…"
+	}
+	return diagnostic
+}
+
+func sshAssessmentError(err error) Finding {
+	return Finding{
+		ControlID:     "SSH-ASSESS-ERROR",
+		Title:         "Read effective SSH configuration",
+		Status:        StatusError,
+		Applicability: ApplicabilityApplicable,
+		Severity:      "HIGH",
+		CurrentValue:  "",
+		ExpectedValue: "Effective SSH configuration is readable",
+		Message:       err.Error(),
+		Source:        sshConfigSource,
+		Error: &NormalizedError{
+			Code:    "ASSESSMENT_EVALUATION_FAILED",
+			Message: err.Error(),
+			Source:  sshConfigSource,
+		},
+	}
+}
+
 func checkSSHDirective(
 	config map[string]string,
-	controlID string,
-	title string,
-	directive string,
-	expected string,
-	severity string,
+	control catalog.Control,
 ) Finding {
+	directive := control.EffectiveSettingKey
 	current, exists := config[strings.ToLower(directive)]
 
 	if !exists {
@@ -100,7 +149,7 @@ func checkSSHDirective(
 
 	status := StatusFail
 
-	if strings.EqualFold(current, expected) {
+	if strings.EqualFold(current, control.ExpectedValue) {
 		status = StatusPass
 	}
 
@@ -110,13 +159,29 @@ func checkSSHDirective(
 		message = "Effective configuration matches expected value"
 	}
 
+	evidence := make([]Evidence, 0, len(control.Evidence))
+	for _, expectation := range control.Evidence {
+		evidence = append(evidence, Evidence{
+			Name:   expectation.SettingKey,
+			Value:  config[strings.ToLower(expectation.SettingKey)],
+			Source: expectation.Source,
+		})
+	}
+	source := sshConfigSource
+	if len(control.Evidence) > 0 {
+		source = control.Evidence[0].Source
+	}
+
 	return Finding{
-		ControlID:     controlID,
-		Title:         title,
+		ControlID:     control.ID,
+		Title:         control.Title,
 		Status:        status,
-		Severity:      severity,
+		Applicability: ApplicabilityApplicable,
+		Severity:      control.Severity,
 		CurrentValue:  current,
-		ExpectedValue: expected,
+		ExpectedValue: control.ExpectedValue,
 		Message:       message,
+		Source:        source,
+		Evidence:      evidence,
 	}
 }

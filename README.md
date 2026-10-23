@@ -2,6 +2,8 @@
 
 An autonomous, policy-bounded security hardening platform designed to assess and remediate security configuration across heterogeneous environments.
 
+See [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for the full project scope, evidence levels, current status, risks, roadmap, and acceptance criteria.
+
 ## Problem Statement
 
 SIH25237 — Autonomous Multi-Platform Security Hardening Agent

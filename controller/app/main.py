@@ -4,6 +4,8 @@ from fastapi import FastAPI
 
 from app.api.targets import router as targets_router
 from app.api.agent_status import router as agent_status_router
+from app.api.enrollments import router as enrollments_router
+from app.api.policies import router as policies_router
 from app.db.database import engine
 from app.db.models import Base
 
@@ -18,10 +20,15 @@ app = FastAPI(
     title="Autonomous Multi-Platform Security Hardening Agent",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.include_router(targets_router)
 app.include_router(agent_status_router)
+app.include_router(enrollments_router)
+app.include_router(policies_router)
 
 
 @app.get("/health")
