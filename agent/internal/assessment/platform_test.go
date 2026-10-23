@@ -3,6 +3,8 @@ package assessment
 import (
 	"errors"
 	"testing"
+
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/catalog"
 )
 
 func TestParseOSReleaseSupportsQuotedValuesAndShellStyleEscapes(t *testing.T) {
@@ -106,6 +108,47 @@ func TestAssessHostDoesNotDispatchUbuntuControlsToCentOSStream(t *testing.T) {
 	}
 	if finding.Applicability == ApplicabilityNotApplicable || finding.Status == StatusPass {
 		t.Fatalf("unsupported CentOS was incorrectly marked compliant or not applicable: %#v", finding)
+	}
+}
+
+func TestAssessHostDispatchesExactCentOSStream9ARM64Identity(t *testing.T) {
+	called := false
+	result := assessHost("linux", "arm64", []byte("ID=centos\nNAME=\"CentOS Stream\"\nVERSION_ID=9\nPRETTY_NAME=\"CentOS Stream 9\"\n"), nil, func() ([]byte, []byte, error) {
+		called = true
+		return []byte(compliantSSHDOutput), nil, nil
+	})
+	if !called || result.Platform != PlatformCentOSStream || len(result.Findings) != 4 {
+		t.Fatalf("dispatch result called=%v assessment=%#v", called, result)
+	}
+	for i, finding := range result.Findings {
+		control := catalog.Controls(catalog.PlatformCentOSStream)[i]
+		if finding.ControlID != control.ID || finding.Status != StatusPass || finding.ExpectedValue != control.ExpectedValue || finding.Source != sshConfigSource || len(finding.Evidence) != 1 || finding.Evidence[0].Value != control.ExpectedValue {
+			t.Errorf("finding[%d]=%#v control=%#v", i, finding, control)
+		}
+	}
+}
+
+func TestAssessHostRejectsCentOSIdentityOutsideExactScope(t *testing.T) {
+	tests := []struct{ name, goos, arch, release string }{
+		{"wrong distribution", "linux", "arm64", "ID=rocky\nNAME=\"CentOS Stream\"\nVERSION_ID=9\nPRETTY_NAME=\"CentOS Stream 9\"\n"},
+		{"wrong version", "linux", "arm64", "ID=centos\nNAME=\"CentOS Stream\"\nVERSION_ID=10\nPRETTY_NAME=\"CentOS Stream 10\"\n"},
+		{"wrong architecture", "linux", "amd64", "ID=centos\nNAME=\"CentOS Stream\"\nVERSION_ID=9\nPRETTY_NAME=\"CentOS Stream 9\"\n"},
+		{"missing name", "linux", "arm64", "ID=centos\nVERSION_ID=9\nPRETTY_NAME=\"CentOS Stream 9\"\n"},
+		{"inconsistent pretty name", "linux", "arm64", "ID=centos\nNAME=\"CentOS Stream\"\nVERSION_ID=9\nPRETTY_NAME=\"CentOS Linux 9\"\n"},
+		{"malformed identity", "linux", "arm64", "ID=centos\nNAME=\"CentOS Stream\nVERSION_ID=9\n"},
+		{"wrong OS", "freebsd", "arm64", "ID=centos\nNAME=\"CentOS Stream\"\nVERSION_ID=9\nPRETTY_NAME=\"CentOS Stream 9\"\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			result := assessHost(test.goos, test.arch, []byte(test.release), nil, func() ([]byte, []byte, error) { called = true; return []byte(compliantSSHDOutput), nil, nil })
+			if called {
+				t.Fatal("unsupported identity invoked SSH evaluator")
+			}
+			if len(result.Findings) != 1 || result.Findings[0].Status != StatusUnknown || result.Findings[0].Error == nil {
+				t.Fatalf("result=%#v, want UNKNOWN", result)
+			}
+		})
 	}
 }
 

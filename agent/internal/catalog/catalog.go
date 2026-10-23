@@ -11,7 +11,10 @@ import (
 
 type Platform string
 
-const PlatformUbuntu Platform = "ubuntu"
+const (
+	PlatformUbuntu       Platform = "ubuntu"
+	PlatformCentOSStream Platform = "centos-stream"
+)
 
 type Control struct {
 	ID                  string
@@ -58,10 +61,18 @@ type VerificationExpectation struct {
 }
 
 type Provenance struct {
+	Classification   ProvenanceClassification
 	DefinitionSource string
 	Benchmark        BenchmarkProvenance
 	Notes            string
 }
+
+type ProvenanceClassification string
+
+const (
+	ProvenanceBenchmarkReferenced ProvenanceClassification = "BENCHMARK_REFERENCED"
+	ProvenanceProjectDefined      ProvenanceClassification = "PROJECT_DEFINED_BASELINE"
+)
 
 type BenchmarkProvenance struct {
 	Title                     string
@@ -91,6 +102,9 @@ const (
 	EffectiveSSHConfigSource = "ssh.effective_config"
 	EffectiveSSHConfigMethod = "sshd -T effective configuration"
 )
+
+const ProjectSSHBaselineName = "Project-defined SSH baseline"
+const ProjectSSHBaselineProvenanceNotes = "Project-defined SSH baseline; authoritative CentOS benchmark mapping has not been verified."
 
 var ubuntuSSHControls = []Control{
 	{
@@ -164,6 +178,24 @@ var ubuntuSSHControls = []Control{
 	},
 }
 
+var centOSStream9SSHControls = []Control{
+	centOSStream9SSHControl("CSTS9-SSH-001", "Disable SSH empty passwords", "PermitEmptyPasswords", "no", "MEDIUM"),
+	centOSStream9SSHControl("CSTS9-SSH-002", "Disable SSH root login", "PermitRootLogin", "no", "HIGH"),
+	centOSStream9SSHControl("CSTS9-SSH-003", "Disable SSH user environment", "PermitUserEnvironment", "no", "MEDIUM"),
+	centOSStream9SSHControl("CSTS9-SSH-004", "Enable SSH PAM", "UsePAM", "yes", "MEDIUM"),
+}
+
+func centOSStream9SSHControl(id, title, key, expected, severity string) Control {
+	return Control{
+		ID: id, Title: title,
+		Scope:         PlatformScope{Platform: PlatformCentOSStream, OSFamily: "CentOS Stream", ValidatedOSVersions: []string{"9"}, ValidatedArchitectures: []string{"arm64"}, Limitations: "Project-defined baseline scoped to CentOS Stream 9 ARM64; no authoritative benchmark mapping or live target verification is claimed."},
+		ExpectedValue: expected, EffectiveSettingKey: key, Severity: severity,
+		Evidence:     []EvidenceExpectation{{SettingKey: key, Source: EffectiveSSHConfigSource, Method: EffectiveSSHConfigMethod}},
+		Verification: sshVerification(key, expected),
+		Provenance:   Provenance{Classification: ProvenanceProjectDefined, DefinitionSource: ProjectSSHBaselineName, Notes: ProjectSSHBaselineProvenanceNotes},
+	}
+}
+
 func ubuntuSSHScope() PlatformScope {
 	return PlatformScope{
 		Platform:               PlatformUbuntu,
@@ -185,6 +217,7 @@ func sshVerification(key, expected string) VerificationExpectation {
 
 func existingImplementationProvenance(controlReference, recommendationTitle string) Provenance {
 	return Provenance{
+		Classification:   ProvenanceBenchmarkReferenced,
 		DefinitionSource: "Existing Ubuntu SSH assessment implementation",
 		Benchmark: BenchmarkProvenance{
 			Title:                     OfficialBenchmarkTitle,
@@ -205,10 +238,14 @@ func existingImplementationProvenance(controlReference, recommendationTitle stri
 
 // Controls returns the catalog entries for a platform in stable order.
 func Controls(platform Platform) []Control {
-	if !strings.EqualFold(string(platform), string(PlatformUbuntu)) {
+	switch {
+	case strings.EqualFold(string(platform), string(PlatformUbuntu)):
+		return cloneControls(ubuntuSSHControls)
+	case strings.EqualFold(string(platform), string(PlatformCentOSStream)):
+		return cloneControls(centOSStream9SSHControls)
+	default:
 		return nil
 	}
-	return cloneControls(ubuntuSSHControls)
 }
 
 // Lookup returns a copy of a control definition for the given platform and ID.
@@ -293,6 +330,18 @@ func Validate(controls []Control) error {
 		}
 		if control.Provenance.DefinitionSource == "" || control.Provenance.Notes == "" {
 			return fmt.Errorf("control %q provenance must be documented", control.ID)
+		}
+		if control.Provenance.Classification == ProvenanceProjectDefined {
+			if control.Provenance.DefinitionSource != ProjectSSHBaselineName || control.Provenance.Notes != ProjectSSHBaselineProvenanceNotes || control.Scope.Platform != PlatformCentOSStream || control.Scope.OSFamily != "CentOS Stream" || len(control.Scope.ValidatedOSVersions) != 1 || control.Scope.ValidatedOSVersions[0] != "9" || len(control.Scope.ValidatedArchitectures) != 1 || control.Scope.ValidatedArchitectures[0] != "arm64" || control.Provenance.Benchmark != (BenchmarkProvenance{}) {
+				return fmt.Errorf("control %q project-defined provenance must be explicit and cannot include benchmark claims", control.ID)
+			}
+			if control.Remediation.Supported || control.Remediation.ActionID != "" || control.Remediation.ActionTitle != "" || control.Remediation.ActionType != "" || control.Remediation.DesiredValue != "" || control.Remediation.RiskScore != 0 || control.Remediation.RequiresApproval {
+				return fmt.Errorf("control %q project-defined baseline cannot declare remediation", control.ID)
+			}
+			continue
+		}
+		if control.Provenance.Classification != ProvenanceBenchmarkReferenced {
+			return fmt.Errorf("control %q has an unsupported provenance classification", control.ID)
 		}
 		benchmark := control.Provenance.Benchmark
 		if benchmark.Title == "" || benchmark.Version == "" || benchmark.ControlReference != control.ID || benchmark.RecommendationTitle == "" {

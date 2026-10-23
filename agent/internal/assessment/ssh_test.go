@@ -210,6 +210,72 @@ func TestEvaluatorFailureNeverProducesPassingFindings(t *testing.T) {
 	assertNoPassingFindings(t, findings)
 }
 
+func TestCentOSSSHControlsPassAndFailIndependently(t *testing.T) {
+	controls := catalog.Controls(catalog.PlatformCentOSStream)
+	for i, control := range controls {
+		for _, state := range []struct {
+			name, value string
+			want        Status
+		}{
+			{"expected", control.ExpectedValue, StatusPass},
+			{"opposite", map[string]string{"no": "yes", "yes": "no"}[control.ExpectedValue], StatusFail},
+		} {
+			t.Run(control.ID+"/"+state.name, func(t *testing.T) {
+				output := []byte(strings.ToLower(compliantSSHDOutput))
+				key := strings.ToLower(control.EffectiveSettingKey)
+				output = []byte(strings.Replace(string(output), key+" "+control.ExpectedValue, key+" "+state.value, 1))
+				findings := assessSSHControlsForPlatform(catalog.PlatformCentOSStream, fakeSSHConfigRunner(output, nil, nil))
+				finding := findings[i]
+				if finding.ControlID != control.ID || finding.Status != state.want || finding.ExpectedValue != control.ExpectedValue || finding.CurrentValue != state.value {
+					t.Fatalf("finding=%#v", finding)
+				}
+				if finding.Source != catalog.EffectiveSSHConfigSource || len(finding.Evidence) != 1 || finding.Evidence[0].Name != control.EffectiveSettingKey || finding.Evidence[0].Value != state.value || finding.Evidence[0].Source != finding.Source {
+					t.Fatalf("evidence mismatch: %#v", finding)
+				}
+			})
+		}
+	}
+}
+
+func TestCentOSMixedFindingsAreIndependent(t *testing.T) {
+	output := "permitemptyPasswords yes\npermitrootlogin no\npermituserenvironment yes\nusepam yes\n"
+	findings := assessSSHControlsForPlatform(catalog.PlatformCentOSStream, fakeSSHConfigRunner([]byte(output), nil, nil))
+	want := []Status{StatusFail, StatusPass, StatusFail, StatusPass}
+	for i := range want {
+		if findings[i].Status != want[i] {
+			t.Errorf("finding %s status=%s want=%s", findings[i].ControlID, findings[i].Status, want[i])
+		}
+	}
+}
+
+func TestCentOSRootLoginWithoutPasswordFailsProjectBaseline(t *testing.T) {
+	output := "permitemptyPasswords no\npermitrootlogin without-password\npermituserenvironment no\nusepam yes\n"
+	findings := assessSSHControlsForPlatform(catalog.PlatformCentOSStream, fakeSSHConfigRunner([]byte(output), nil, nil))
+	if findings[1].ControlID != "CSTS9-SSH-002" || findings[1].Status != StatusFail || findings[1].CurrentValue != "without-password" || findings[1].ExpectedValue != "no" {
+		t.Fatalf("root-login finding=%#v", findings[1])
+	}
+}
+
+func TestCentOSSSHInvalidOutputAndCommandFailureNeverPass(t *testing.T) {
+	tests := []struct {
+		name, output, stderr string
+		err                  error
+		want                 string
+	}{
+		{"missing", "permitrootlogin no\npermituserenvironment no\nusepam yes\n", "", nil, "missing required directives"},
+		{"duplicate", compliantSSHDOutput + "usepam no\n", "", nil, "duplicate usepam directive"},
+		{"malformed", "permitemptyPasswords no extra\npermitrootlogin no\npermituserenvironment no\nusepam yes\n", "", nil, "malformed permitemptyPasswords directive"},
+		{"sudo -n failure", "", "sudo: a password is required", errors.New("exit status 1"), "sudo: a password is required"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			findings := assessSSHControlsForPlatform(catalog.PlatformCentOSStream, fakeSSHConfigRunner([]byte(test.output), []byte(test.stderr), test.err))
+			assertAssessmentError(t, findings, test.want)
+			assertNoPassingFindings(t, findings)
+		})
+	}
+}
+
 func assertNoPassingFindings(t *testing.T, findings []Finding) {
 	t.Helper()
 	for _, finding := range findings {

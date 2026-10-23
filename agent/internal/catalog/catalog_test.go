@@ -109,6 +109,72 @@ func TestUnsupportedPlatformsHaveNoCatalogEntries(t *testing.T) {
 	}
 }
 
+func TestCentOSStream9CatalogIsProjectDefinedAndAssessmentOnly(t *testing.T) {
+	controls := Controls(PlatformCentOSStream)
+	if len(controls) != 4 {
+		t.Fatalf("got %d CentOS controls, want 4", len(controls))
+	}
+	if err := Validate(controls); err != nil {
+		t.Fatalf("validate CentOS catalog: %v", err)
+	}
+	want := []struct{ id, key, value string }{
+		{"CSTS9-SSH-001", "PermitEmptyPasswords", "no"},
+		{"CSTS9-SSH-002", "PermitRootLogin", "no"},
+		{"CSTS9-SSH-003", "PermitUserEnvironment", "no"},
+		{"CSTS9-SSH-004", "UsePAM", "yes"},
+	}
+	for i, control := range controls {
+		expected := want[i]
+		if control.ID != expected.id || control.EffectiveSettingKey != expected.key || control.ExpectedValue != expected.value {
+			t.Errorf("control[%d]=%#v, want %#v", i, control, expected)
+		}
+		if control.Scope.Platform != PlatformCentOSStream || control.Scope.OSFamily != "CentOS Stream" || len(control.Scope.ValidatedOSVersions) != 1 || control.Scope.ValidatedOSVersions[0] != "9" || len(control.Scope.ValidatedArchitectures) != 1 || control.Scope.ValidatedArchitectures[0] != "arm64" {
+			t.Errorf("scope=%#v", control.Scope)
+		}
+		if control.Provenance.Classification != ProvenanceProjectDefined || control.Provenance.DefinitionSource != ProjectSSHBaselineName || control.Provenance.Benchmark != (BenchmarkProvenance{}) {
+			t.Errorf("provenance=%#v", control.Provenance)
+		}
+		if control.Remediation != (Remediation{}) {
+			t.Errorf("CentOS remediation must be empty: %#v", control.Remediation)
+		}
+		if len(control.Evidence) != 1 || control.Evidence[0].SettingKey != expected.key || control.Evidence[0].Source != EffectiveSSHConfigSource || control.Verification.ExpectedValue != expected.value {
+			t.Errorf("evidence/verification mismatch: %#v", control)
+		}
+	}
+}
+
+func TestProjectDefinedProvenanceCannotBeUsedToWeakenUbuntuValidation(t *testing.T) {
+	controls := Controls(PlatformUbuntu)
+	controls[0].Provenance.Classification = ProvenanceProjectDefined
+	if err := Validate(controls); err == nil {
+		t.Fatal("Ubuntu accepted project-defined provenance classification")
+	}
+}
+
+func TestValidateRejectsCentOSProjectBaselineBenchmarkClaimsAndRemediation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Control)
+	}{
+		{name: "benchmark title", mutate: func(c *Control) { c.Provenance.Benchmark.Title = "Unverified benchmark" }},
+		{name: "benchmark reference", mutate: func(c *Control) { c.Provenance.Benchmark.ControlReference = "CIS-5.1.19" }},
+		{name: "benchmark claim in notes", mutate: func(c *Control) { c.Provenance.Notes = "Verified against the CentOS CIS benchmark." }},
+		{name: "remediation metadata", mutate: func(c *Control) { c.Remediation.ActionID = "ACT-CSTS9-SSH-002" }},
+		{name: "supported remediation", mutate: func(c *Control) {
+			c.Remediation = Remediation{Supported: true, ActionID: "ACT-CSTS9-SSH-002", ActionTitle: "Change SSH setting", ActionType: "SET_SSH_DIRECTIVE", DesiredValue: "no", RiskScore: 1, RequiresApproval: true}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			controls := Controls(PlatformCentOSStream)
+			test.mutate(&controls[0])
+			if err := Validate(controls); err == nil {
+				t.Fatal("Validate accepted CentOS project baseline with unsupported metadata")
+			}
+		})
+	}
+}
+
 func TestValidateRejectsDuplicateAndIncompleteDefinitions(t *testing.T) {
 	valid := Controls(PlatformUbuntu)
 	if err := Validate(nil); err == nil || !strings.Contains(err.Error(), "at least one control") {
