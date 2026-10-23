@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from app.approvals.bindings import MAX_ASSESSMENT_JSON_BYTES
+
 
 @dataclass(frozen=True)
 class AgentStatus:
@@ -138,3 +140,20 @@ def get_agent_read_only_payload(
     response = httpx.get(url, timeout=timeout)
     response.raise_for_status()
     return response.json()
+
+
+def get_agent_read_only_bytes(
+    base_url: str,
+    endpoint: str,
+    timeout: float = 5.0,
+) -> bytes:
+    """Fetch the exact UTF-8 response body for validation and provenance storage."""
+    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    body = bytearray()
+    with httpx.stream("GET", url, timeout=timeout) as response:
+        response.raise_for_status()
+        for chunk in response.iter_bytes():
+            if len(body) + len(chunk) > MAX_ASSESSMENT_JSON_BYTES:
+                raise ValueError("Agent response exceeds maximum supported size")
+            body.extend(chunk)
+    return bytes(body)

@@ -1,13 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException
+import json
+
 import httpx
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.client import (
     AgentStatusURLConfigurationError,
+    get_agent_read_only_bytes,
     get_agent_read_only_payload,
     get_agent_status,
     resolve_agent_status_url,
+)
+from app.assessments.provenance import (
+    ObservationStorageUnavailable,
+    store_assessment_observation,
 )
 from app.db.database import get_db
 from app.db.models import Target
@@ -75,7 +82,37 @@ def _proxy_agent_json(target_id: str, db: Session, endpoint: str, payload_name: 
 
 @router.get("/{target_id}/assessment")
 def assessment(target_id: str, db: Session = Depends(get_db)) -> dict:
-    return _proxy_agent_json(target_id, db, "assessment", "assessment")
+    target = _get_target(target_id, db)
+    base_url = _get_agent_base_url(target)
+    try:
+        raw_payload = get_agent_read_only_bytes(base_url, "assessment")
+        observation = store_assessment_observation(
+            db,
+            target=target,
+            raw_payload=raw_payload,
+            # There is no Controller-owned policy/catalog registry yet.
+            policy_version=None,
+            catalog_version=None,
+        )
+        payload = json.loads(raw_payload.decode("utf-8", errors="strict"))
+    except ObservationStorageUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Assessment was received but could not be stored",
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Agent assessment could not be validated: {exc}",
+        ) from exc
+
+    return {
+        "target_id": target.id,
+        "target_name": target.name,
+        "assessment": payload,
+        "assessment_observation_id": observation.observation_id,
+        "assessment_trust_status": observation.trust_status,
+    }
 
 
 @router.get("/{target_id}/plan")

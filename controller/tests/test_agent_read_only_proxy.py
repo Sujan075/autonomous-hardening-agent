@@ -1,5 +1,6 @@
 import json
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -7,17 +8,29 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.db.database import get_db
+from app.db.models import Target
 from app.main import app
+from app.assessments.provenance import (
+    ObservationStorageUnavailable,
+)
+from app.approvals.bindings import MAX_ASSESSMENT_JSON_BYTES
 
 
 TARGET_ID = "8865f49b-d545-4a8a-8511-766eaedea892"
-TARGET = SimpleNamespace(id=TARGET_ID, name="Ubuntu lab", address="192.0.2.10")
+TARGET = Target(
+    id=TARGET_ID,
+    name="Ubuntu lab",
+    platform="ubuntu",
+    address="192.0.2.10",
+    status="REGISTERED",
+)
 
 
 class AgentReadOnlyProxyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db = Mock()
         self.db.scalar.return_value = TARGET
+        self.db.get.return_value = TARGET
         app.dependency_overrides[get_db] = lambda: self.db
         self.client = TestClient(app)
 
@@ -25,13 +38,28 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
         app.dependency_overrides.clear()
 
     @patch.dict("os.environ", {"AGENT_STATUS_URL_OVERRIDES": json.dumps({TARGET_ID: "http://127.0.0.1:19000"})})
-    @patch("app.agents.client.httpx.get")
-    def test_assessment_uses_override_and_preserves_upstream_json(self, mock_get: Mock) -> None:
-        payload = {"items": [{"id": "CIS-1", "details": {"severity": "high"}}]}
-        mock_get.return_value = httpx.Response(
+    @patch("app.agents.client.httpx.stream")
+    @patch("app.api.agent_status.store_assessment_observation")
+    def test_assessment_uses_override_stores_raw_and_preserves_upstream_json(
+        self, mock_store: Mock, mock_stream: Mock
+    ) -> None:
+        payload = {
+            "platform": "ubuntu",
+            "findings": [{
+                "control_id": "CIS-1", "title": "SSH setting", "status": "FAIL",
+                "severity": "high", "current_value": "yes", "expected_value": "no",
+                "message": "disable root login", "source": "sshd",
+            }],
+        }
+        upstream_response = httpx.Response(
             200,
             json=payload,
             request=httpx.Request("GET", "http://127.0.0.1:19000/assessment"),
+        )
+        mock_stream.return_value = nullcontext(upstream_response)
+        mock_store.return_value = SimpleNamespace(
+            observation_id="observation-controller-1",
+            trust_status="controller_observed_unauthenticated",
         )
 
         response = self.client.get(f"/api/targets/{TARGET_ID}/assessment")
@@ -41,8 +69,52 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
             "target_id": TARGET_ID,
             "target_name": "Ubuntu lab",
             "assessment": payload,
+            "assessment_observation_id": "observation-controller-1",
+            "assessment_trust_status": "controller_observed_unauthenticated",
         })
-        mock_get.assert_called_once_with("http://127.0.0.1:19000/assessment", timeout=5.0)
+        mock_stream.assert_called_once_with("GET", "http://127.0.0.1:19000/assessment", timeout=5.0)
+        mock_store.assert_called_once()
+        self.assertEqual(mock_store.call_args.kwargs["target"], TARGET)
+        self.assertEqual(mock_store.call_args.kwargs["policy_version"], None)
+        self.assertEqual(mock_store.call_args.kwargs["catalog_version"], None)
+
+    @patch.dict("os.environ", {"AGENT_STATUS_URL_OVERRIDES": json.dumps({TARGET_ID: "http://127.0.0.1:19000"})})
+    @patch("app.agents.client.httpx.stream")
+    @patch("app.api.agent_status.store_assessment_observation")
+    def test_assessment_storage_failure_is_not_reported_as_success(
+        self, mock_store: Mock, mock_stream: Mock
+    ) -> None:
+        upstream_response = httpx.Response(
+            200,
+            json={"platform": "ubuntu", "findings": []},
+            request=httpx.Request("GET", "http://127.0.0.1:19000/assessment"),
+        )
+        mock_stream.return_value = nullcontext(upstream_response)
+        mock_store.side_effect = ObservationStorageUnavailable("offline")
+
+        response = self.client.get(f"/api/targets/{TARGET_ID}/assessment")
+
+        self.assertEqual(response.status_code, 503)
+        mock_stream.assert_called_once()
+        mock_store.assert_called_once()
+
+    @patch.dict("os.environ", {"AGENT_STATUS_URL_OVERRIDES": json.dumps({TARGET_ID: "http://127.0.0.1:19000"})})
+    @patch("app.agents.client.httpx.stream")
+    @patch("app.api.agent_status.store_assessment_observation")
+    def test_oversized_agent_assessment_is_rejected_before_storage(
+        self, mock_store: Mock, mock_stream: Mock
+    ) -> None:
+        upstream_response = httpx.Response(
+            200,
+            content=b" " * (MAX_ASSESSMENT_JSON_BYTES + 1),
+            request=httpx.Request("GET", "http://127.0.0.1:19000/assessment"),
+        )
+        mock_stream.return_value = nullcontext(upstream_response)
+
+        response = self.client.get(f"/api/targets/{TARGET_ID}/assessment")
+
+        self.assertEqual(response.status_code, 502)
+        mock_store.assert_not_called()
 
     @patch.dict("os.environ", {"AGENT_STATUS_URL_OVERRIDES": json.dumps({TARGET_ID: "http://127.0.0.1:19000"})})
     @patch("app.agents.client.httpx.get")
@@ -94,13 +166,19 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
 
     @patch.dict("os.environ", {}, clear=True)
     @patch("app.agents.client.httpx.get")
-    def test_upstream_connection_and_invalid_json_return_502(self, mock_get: Mock) -> None:
-        mock_get.side_effect = httpx.ConnectTimeout("timed out")
+    @patch("app.agents.client.httpx.stream")
+    def test_upstream_connection_and_invalid_json_return_502(
+        self, mock_stream: Mock, mock_get: Mock
+    ) -> None:
+        mock_stream.side_effect = httpx.ConnectTimeout("timed out")
         failed = self.client.get(f"/api/targets/{TARGET_ID}/assessment")
         self.assertEqual(failed.status_code, 502)
-        mock_get.assert_called_once_with("http://192.0.2.10:9000/assessment", timeout=5.0)
+        mock_stream.assert_called_once_with(
+            "GET", "http://192.0.2.10:9000/assessment", timeout=5.0
+        )
 
         mock_get.reset_mock()
+        mock_stream.reset_mock()
         mock_get.return_value = httpx.Response(
             200,
             content=b"not-json",
