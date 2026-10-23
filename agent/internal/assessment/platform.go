@@ -15,26 +15,38 @@ const platformDispatchSource = "platform.dispatch"
 // the Ubuntu control set.
 func AssessCurrentHost() Assessment {
 	data, err := readOSRelease()
-	return assessHost(runtime.GOOS, data, err, runEffectiveSSHConfig)
+	return assessHost(runtime.GOOS, runtime.GOARCH, data, err, runEffectiveSSHConfig)
 }
 
 func readOSRelease() ([]byte, error) {
 	return os.ReadFile("/etc/os-release")
 }
 
-func assessHost(goos string, releaseData []byte, releaseErr error, runner sshConfigRunner) Assessment {
+func assessHost(goos, goarch string, releaseData []byte, releaseErr error, runner sshConfigRunner) Assessment {
 	if goos != "linux" {
 		return unsupportedPlatformAssessment(goos, "", "this operating system has no registered assessment adapter")
 	}
 	if releaseErr != nil {
 		return unsupportedPlatformAssessment("linux", "", fmt.Sprintf("cannot identify Linux distribution: %v", releaseErr))
 	}
-	release := parseOSRelease(releaseData)
+	release, err := parseOSRelease(releaseData)
+	if err != nil {
+		return unsupportedPlatformAssessment("linux", "", fmt.Sprintf("cannot parse Linux distribution identity: %v", err))
+	}
 	id := release["ID"]
 	version := release["VERSION_ID"]
 	prettyName := release["PRETTY_NAME"]
+	if id == "" || version == "" {
+		return unsupportedPlatformAssessment("linux", version, "Linux distribution identity is incomplete: ID and VERSION_ID are required")
+	}
 
-	if id == "ubuntu" && ubuntuCatalogVersion(version, prettyName) {
+	if id == "ubuntu" {
+		if !ubuntuCatalogVersion(version, prettyName) {
+			return unsupportedPlatformAssessment("ubuntu", version, "Ubuntu release identity is incomplete or outside the supported 24.04.5 catalog scope")
+		}
+		if goarch != "arm64" {
+			return unsupportedPlatformAssessment("ubuntu", version, fmt.Sprintf("Ubuntu 24.04.5 architecture %q is not in the supported catalog scope", goarch))
+		}
 		return Assessment{Platform: PlatformUbuntu, Findings: assessSSHControls(runner)}
 	}
 	if id == "centos" && release["NAME"] == "CentOS Stream" {
@@ -55,26 +67,42 @@ func ubuntuCatalogVersion(version, prettyName string) bool {
 	return len(fields) >= 2 && fields[0] == "Ubuntu" && fields[1] == "24.04.5"
 }
 
-func parseOSRelease(data []byte) map[string]string {
+func parseOSRelease(data []byte) (map[string]string, error) {
 	values := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
+	for lineNumber, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
-		if !ok || key == "" {
-			continue
+		if !ok || key == "" || strings.TrimSpace(key) != key || !validOSReleaseKey(key) {
+			return nil, fmt.Errorf("malformed os-release assignment on line %d", lineNumber+1)
+		}
+		if _, exists := values[key]; exists {
+			return nil, fmt.Errorf("duplicate os-release key %s", key)
 		}
 		value = strings.TrimSpace(value)
-		if decoded, err := strconv.Unquote(value); err == nil {
+		if strings.HasPrefix(value, `"`) || strings.HasSuffix(value, `"`) {
+			decoded, err := strconv.Unquote(value)
+			if err != nil {
+				return nil, fmt.Errorf("malformed quoted os-release value for %s on line %d", key, lineNumber+1)
+			}
 			value = decoded
-		} else {
-			value = strings.Trim(value, "'")
+		} else if strings.ContainsAny(value, " \t\r\n\"'") {
+			return nil, fmt.Errorf("malformed unquoted os-release value for %s on line %d", key, lineNumber+1)
 		}
 		values[key] = value
 	}
-	return values
+	return values, nil
+}
+
+func validOSReleaseKey(key string) bool {
+	for _, character := range key {
+		if (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func unsupportedPlatformAssessment(platform, version, reason string) Assessment {

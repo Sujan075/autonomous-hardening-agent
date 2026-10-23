@@ -7,7 +7,7 @@ import (
 
 func TestAssessHostDispatchesOnlySupportedUbuntuCatalog(t *testing.T) {
 	called := false
-	result := assessHost("linux", []byte("ID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\n"), nil,
+	result := assessHost("linux", "arm64", []byte("ID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\n"), nil,
 		func() ([]byte, []byte, error) {
 			called = true
 			return []byte("permitemptyPasswords no\npermitrootlogin no\npermituserenvironment no\nusepam yes\n"), nil, nil
@@ -28,7 +28,7 @@ func TestAssessHostDispatchesOnlySupportedUbuntuCatalog(t *testing.T) {
 
 func TestAssessHostDoesNotDispatchUbuntuControlsToCentOSStream(t *testing.T) {
 	called := false
-	result := assessHost("linux", []byte("NAME=\"CentOS Stream\"\nID=centos\nVERSION_ID=\"9\"\n"), nil,
+	result := assessHost("linux", "arm64", []byte("NAME=\"CentOS Stream\"\nID=centos\nVERSION_ID=\"9\"\n"), nil,
 		func() ([]byte, []byte, error) {
 			called = true
 			return nil, nil, nil
@@ -51,7 +51,7 @@ func TestAssessHostDoesNotDispatchUbuntuControlsToCentOSStream(t *testing.T) {
 
 func TestAssessHostRejectsUnsupportedUbuntuReleaseBeforeCommands(t *testing.T) {
 	called := false
-	result := assessHost("linux", []byte("ID=ubuntu\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"\n"), nil,
+	result := assessHost("linux", "arm64", []byte("ID=ubuntu\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"\n"), nil,
 		func() ([]byte, []byte, error) {
 			called = true
 			return nil, nil, nil
@@ -64,21 +64,56 @@ func TestAssessHostRejectsUnsupportedUbuntuReleaseBeforeCommands(t *testing.T) {
 	}
 }
 
-func TestAssessHostUnknownOSAndDetectionFailureFailClosed(t *testing.T) {
+func TestAssessHostRejectsUnsupportedOrIncompleteIdentityBeforeCommands(t *testing.T) {
 	tests := []struct {
-		name         string
-		goos         string
-		release      []byte
-		releaseError error
+		name    string
+		goarch  string
+		release string
 	}{
-		{name: "non Linux", goos: "windows"},
-		{name: "release unavailable", goos: "linux", releaseError: errors.New("read denied")},
-		{name: "unknown Linux distribution", goos: "linux", release: []byte("ID=fedora\nVERSION_ID=42\n")},
+		{name: "unsupported Ubuntu point release", goarch: "arm64", release: "ID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.6 LTS\"\n"},
+		{name: "older Ubuntu release", goarch: "arm64", release: "ID=ubuntu\nVERSION_ID=22.04\nPRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\n"},
+		{name: "other distribution", goarch: "arm64", release: "ID=debian\nVERSION_ID=12\nPRETTY_NAME=\"Debian GNU/Linux 12\"\n"},
+		{name: "unsupported architecture", goarch: "amd64", release: "ID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\n"},
+		{name: "missing ID", goarch: "arm64", release: "VERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\n"},
+		{name: "missing version", goarch: "arm64", release: "ID=ubuntu\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\n"},
+		{name: "missing pretty name", goarch: "arm64", release: "ID=ubuntu\nVERSION_ID=24.04\n"},
+		{name: "malformed quoted identity", goarch: "arm64", release: "ID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\n"},
+		{name: "duplicate identity key", goarch: "arm64", release: "ID=ubuntu\nID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\n"},
+		{name: "malformed os-release line", goarch: "arm64", release: "ID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nBROKEN\n"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			called := false
-			result := assessHost(test.goos, test.release, test.releaseError, func() ([]byte, []byte, error) {
+			result := assessHost("linux", test.goarch, []byte(test.release), nil, func() ([]byte, []byte, error) {
+				called = true
+				return []byte(compliantSSHDOutput), nil, nil
+			})
+			if called {
+				t.Fatal("unsupported or incomplete identity dispatched the Ubuntu evaluator")
+			}
+			if len(result.Findings) != 1 || result.Findings[0].Status != StatusUnknown || result.Findings[0].Error == nil {
+				t.Fatalf("identity result = %#v, want explicit UNKNOWN", result)
+			}
+		})
+	}
+}
+
+func TestAssessHostUnknownOSAndDetectionFailureFailClosed(t *testing.T) {
+	tests := []struct {
+		name         string
+		goos         string
+		goarch       string
+		release      []byte
+		releaseError error
+	}{
+		{name: "non Linux", goos: "windows", goarch: "arm64"},
+		{name: "release unavailable", goos: "linux", goarch: "arm64", releaseError: errors.New("read denied")},
+		{name: "unknown Linux distribution", goos: "linux", goarch: "arm64", release: []byte("ID=fedora\nVERSION_ID=42\n")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			result := assessHost(test.goos, test.goarch, test.release, test.releaseError, func() ([]byte, []byte, error) {
 				called = true
 				return nil, nil, nil
 			})
@@ -93,7 +128,7 @@ func TestAssessHostUnknownOSAndDetectionFailureFailClosed(t *testing.T) {
 }
 
 func TestAssessHostRetainsNormalizedUbuntuCommandFailure(t *testing.T) {
-	result := assessHost("linux", []byte("ID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\n"), nil,
+	result := assessHost("linux", "arm64", []byte("ID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\n"), nil,
 		func() ([]byte, []byte, error) {
 			return nil, []byte("sshd unavailable"), errors.New("exit status 1")
 		})
