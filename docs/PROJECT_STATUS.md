@@ -1,8 +1,8 @@
 # SIH25237 Project Status
 
-**Status date:** 2026-10-22
+**Status date:** 2026-10-23
 
-**Repository snapshot:** branch `infothon/rapid-integration`, commit `7379e50` (`feat(agent): dispatch assessments by platform`)
+**Repository snapshot:** branch `infothon/rapid-integration`, starting commit `94b60b6d002bf514d10553488f3c55be2460272d` (`docs: add project status and acceptance tracker`). This tracker update and handler test hardening are local, uncommitted working-tree changes; the branch remains based on the requested pushed commit.
 **Status vocabulary:** NOT STARTED · IN PROGRESS · IMPLEMENTED · UNIT-TESTED · INTEGRATION-TESTED · LIVE-VERIFIED · BLOCKED
 
 This is the repository-backed status record for the full SIH25237 Autonomous Multi-Platform Security Hardening Agent project. Statuses refer only to the named scope and evidence level. A file, mock, unit test, build, or successful Ubuntu demonstration does not by itself establish integration, security readiness, or support on another platform. “BLOCKED” means work cannot safely advance until the stated dependency or evidence is resolved; it does not mean the overall project is abandoned.
@@ -11,7 +11,7 @@ This is the repository-backed status record for the full SIH25237 Autonomous Mul
 
 The repository contains an early Ubuntu vertical slice: a Go target agent, a FastAPI Controller, a shared assessment envelope, a four-control Ubuntu SSH catalog, fail-closed assessment dispatch and planning, and a local SSH-tunnel path for read-only status, assessment, and plan requests. The only actual live target evidenced here is Ubuntu 24.04.5 ARM64. On V8, the live status, assessment, and plan requests succeeded; all four catalogued SSH findings passed and the plan was READY with zero actions.
 
-The project is **not a complete hardening lifecycle**. The agent has guarded execution, state capture, verification, and rollback code with unit tests, but no live privileged execution or rollback has been tested. Secure identity/enrollment and transport-security review are incomplete. CentOS Stream is detected but deliberately has no assessment adapter or controls; the other named platform adapters are not established. The remediation-validation sandbox, separate Cowrie/OpenCanary decoy sandbox, event pipeline, audit/evidence history, full dashboard/reports, and broad integration/security test coverage remain outstanding.
+The project is **not a complete hardening lifecycle**. The agent has guarded execution, state capture, verification, and rollback code with unit tests, but no live privileged execution or rollback has been tested. Focused handler tests now cover method, token, approval/action, and JSON rejection paths and assert rejected requests do not invoke executor operations. The caller-provided `approved` boolean is not authenticated human approval. Agent identity/enrollment, authenticated transport, replay protection, and tamper-evident audit are incomplete; see `docs/SECURITY_MODEL.md`. CentOS Stream is detected but deliberately has no assessment adapter or controls; the other named platform adapters are not established. The remediation-validation sandbox, separate Cowrie/OpenCanary decoy sandbox, event pipeline, audit/evidence history, full dashboard/reports, and broad integration/security test coverage remain outstanding.
 
 No percentage complete, CI status, or total passing-test count is asserted in this tracker.
 
@@ -64,11 +64,11 @@ Unsupported platforms, versions, and control sets must remain explicit and fail 
 | Assessment and evidence | LIVE-VERIFIED | Ubuntu assessment and finding evidence are exercised live through V8 and unit-tested. Shared contract includes applicability, UNKNOWN, evidence/source, and normalized errors. Evidence provenance/history and all non-Ubuntu assessors remain. |
 | Risk, planning, and approval | LIVE-VERIFIED | Ubuntu planner validates complete findings and emits a READY empty plan for the compliant live target. Existing failing root-login case yields an approval-required action in unit tests. Cross-platform risk policy and Controller approval workflow are incomplete. |
 | State capture | UNIT-TESTED | Executor captures file state, digest, permissions, and execution state with tests. Durable multi-target evidence retention and live operation are not established. |
-| Guarded execution | UNIT-TESTED | Agent exposes protected execution behavior with explicit approval/auth token checks and a single currently implemented SSH remediation. No live privileged action was invoked. Authorization design/review and Controller-to-execution integration remain incomplete. |
+| Guarded execution | UNIT-TESTED | Agent `/execute` enforces POST, configured bearer token, `approved: true`, one action ID, valid single-value JSON, and tests rejected requests make zero executor calls. The boolean is caller asserted, not authenticated human approval. No live privileged action was invoked. Authentication/approval design and Controller-to-execution integration remain incomplete; see `docs/SECURITY_MODEL.md`. |
 | Independent verification | UNIT-TESTED | Agent code rereads effective SSH configuration after its supported change and compares the result. No live remediation verification has been performed; independent verifier architecture is not established. |
 | Rollback and recovery | UNIT-TESTED | Recovery state validation and file restoration/reload/verification logic have unit tests. Live rollback has not been tested; broader recovery and crash/interruption cases remain. |
-| Secure identity and enrollment | NOT STARTED | No complete secure agent identity issuance, enrollment, rotation, revocation, or device trust lifecycle is established. `agent-dev` is development identity evidence, not production enrollment. |
-| Transport security and authorization | IN PROGRESS | The lab path used SSH local forwarding to loopback; the agent default bind is loopback. Execution has a token/approval guard. A complete TLS/mTLS deployment, certificate lifecycle, Controller authorization model, threat review, and security acceptance are not established. Sample Controller config has `MTLS_ENABLED=false`; that setting alone does not establish mTLS support. Do not infer production security from the tunnel demo. |
+| Secure identity and enrollment | NOT STARTED | No complete secure agent identity issuance, enrollment, rotation, revocation, or device trust lifecycle is established. `agent-dev` is development identity evidence, not production enrollment. Details and gates are in `docs/SECURITY_MODEL.md`. |
+| Transport security and authorization | IN PROGRESS | Agent HTTP is plaintext and defaults to loopback; the lab path used SSH local forwarding. Agent execution has a shared bearer-token guard, but no token is configured by this task. The caller-supplied approval boolean is not trusted approval. A complete TLS/mTLS deployment, certificate lifecycle, Controller authorization model, threat review, and security acceptance are not established. Sample Controller config has `MTLS_ENABLED=false`; that setting alone does not establish mTLS support. Do not infer production security from the tunnel demo. |
 | Remediation-validation sandbox | NOT STARTED | No isolated apply/verify/recovery validation sandbox is established. Must remain separate from real target execution and include resettable fixtures and safety boundaries. |
 | Attacker/decoy sandbox | NOT STARTED | No Cowrie/OpenCanary decoy deployment or isolation is established. This sandbox is a separate environment and threat surface from remediation validation. |
 | Event collection and normalization | NOT STARTED | No end-to-end event ingestion/normalization implementation is established. |
@@ -84,7 +84,7 @@ Evidence status reflects what has actually been reported or inspected. No CI run
 
 | ID | Evidence | Level | Result and boundary |
 |---|---|---|---|
-| E-01 | Repository snapshot `7379e50` on `infothon/rapid-integration` | Repository | Snapshot stated by project owner. This tracker was added after that commit and is not part of it. |
+| E-01 | Repository snapshot `94b60b6d002bf514d10553488f3c55be2460272d` on `infothon/rapid-integration` | Repository | Starting commit requested by project owner. This tracker and the current handler hardening changes are local and uncommitted. |
 | E-02 | V5/V6/V7/V8 candidates launched on separate localhost ports | Direct test-session report | Candidate separation reported; this is not a claim that all four passed the same tests. |
 | E-03 | V7 Linux ARM64 build and checksum checked on Ubuntu 24.04.5 ARM64 VM | Artifact/live-target report | V7 checksum verification reported. No hash value/run transcript is recorded here. |
 | E-04 | V7 and V8 direct tests and separate Controller instances | Direct test-session report | Reported verified; exact individual command transcripts are not retained in this tracker. |
@@ -94,8 +94,9 @@ Evidence status reflects what has actually been reported or inspected. No CI run
 | E-08 | Formatting and whitespace checks after platform-dispatch change | Codex-reported automated check | `cd agent && gofmt -d internal/assessment/platform.go internal/assessment/platform_test.go internal/assessment/http.go internal/planner/http.go internal/planner/ssh_test.go` reported no differences; `git diff --check` reported passed. Historical reports. |
 | E-09 | Controller unit tests | Codex-reported automated check | Last reported result: 10 tests passed. Exact command and run identifier are not retained; no current CI status is known. |
 | E-10 | Ubuntu benchmark provenance | Source review | CIS Ubuntu 24.04 LTS Benchmark v2.0.0 identity and four mapping titles have secondary-source corroboration. Official benchmark PDF was not directly inspected; formal Ubuntu 24.04.5 ARM64 benchmark applicability remains unconfirmed. |
-| E-11 | Executor/state/recovery tests | Repository/test report | Unit tests exist and prior Go suite was reported passed. No live privileged execution or rollback was invoked. |
+| E-11 | Executor/state/recovery and HTTP handler tests | Repository/test report | Existing injected-operation tests cover state/recovery. New handler tests cover rejected Execute and Rollback requests with zero operation calls, including unset token behavior through the exported handlers. Current Go suite and vet passed; exact commands are in E-13. No live privileged execution or rollback was invoked. |
 | E-12 | `/run/sshd` assessment failure | Live observation | Occurred once, did not reproduce; root cause unconfirmed. |
+| E-13 | Current agent Go checks and repository diff validation | Automated checks, 2026-10-23 | From `agent/`, `go test -count=1 ./...` passed and `go vet ./...` passed. `gofmt -d internal/executor/http.go internal/executor/http_test.go` produced no output. From repository root, `git diff --check` passed. These checks do not constitute live execution or security acceptance. |
 
 ## Test matrix
 
@@ -104,11 +105,12 @@ Keep these evidence levels separate: **defined** means a test/scenario is specif
 | Test scope | Defined target | Automated in repository | Executed | Passed | Live-verified |
 |---|---|---|---|---|---|
 | Ubuntu assessment/catalog/planner | Yes | Yes: Go package tests | Go suite reported executed after dispatch change; see E-06 | Passed per E-06 | Yes, Ubuntu 24.04.5 ARM64, V8 four PASS and READY/zero-actions plan |
-| Ubuntu executor/state/recovery | Yes | Yes: Go unit tests with injected operations/files | Included in reported Go suite; no individual run transcript retained | Suite passed per E-06 | No live execution or rollback |
+| Ubuntu executor/state/recovery and handler authorization | Yes | Yes: Go unit tests with injected operations/files; focused HTTP handler rejection tests | Current requested Go suite and vet run recorded for this snapshot; no live execution/rollback | See current E-13 result | No live execution or rollback |
 | Platform detection/dispatch | Yes | Yes: injected OS-release and command runner tests | Included in reported Go suite; see E-06 | Suite passed per E-06 | Ubuntu dispatch live path observed; CentOS behavior not live-tested |
 | CentOS Stream assessment | Not yet: requirements/control set absent | Detection/fail-closed dispatch unit scenarios only | Included in reported Go suite | Suite passed per E-06 | No CentOS Stream environment; no support claim |
 | Windows, Docker, AWS guest, AWS control plane, ARM64 edge variants | Not yet | No representative platform suites established | No platform-specific runs established | No platform-specific passing results established | No; Ubuntu VM only |
 | Controller status/assessment/plan proxies | Yes | Yes: Controller unittest suite | Yes: last reported run; exact command/run ID unavailable | Yes: 10 passed per E-09 | Yes, V8 over SSH tunnel |
+| Execute/rollback HTTP rejection paths | Yes | Yes: focused Go handler tests; rejected calls assert zero executor invocations | Current requested Go suite recorded at E-13 | See current E-13 result | No live execution or rollback |
 | Integration across lifecycle | Target must be defined | Partial endpoint integration exists; full lifecycle suite not established | Partial V7/V8 Controller sessions reported | No full lifecycle pass reported | Assessment/plan path only; no execute/rollback |
 | Security, identity, transport, authorization, failure injection | Target must be defined | Partial authorization/executor/failure unit tests; full security suite absent | No complete security run reported | No complete security pass reported | No security acceptance review reported |
 | Remediation-validation sandbox | Not yet | No | No | No | No |

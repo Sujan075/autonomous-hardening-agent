@@ -3,6 +3,8 @@ package executor
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -14,19 +16,27 @@ type ExecuteRequest struct {
 }
 
 func ExecuteHandler(w http.ResponseWriter, r *http.Request) {
+	executeHandler(w, r, os.Getenv("AGENT_EXECUTION_TOKEN"), ApplySSHRootLoginDisable)
+}
+
+func executeHandler(w http.ResponseWriter, r *http.Request, expectedToken string, execute func() (ExecutionResult, error)) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	if err := requireExecutionAuthorization(r); err != nil {
+	if err := requireExecutionAuthorization(r, expectedToken); err != nil {
 		http.Error(w, err.Error(), err.status)
 		return
 	}
 
 	var request ExecuteRequest
-
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&request); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if err := requireJSONEnd(decoder); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
@@ -41,7 +51,7 @@ func ExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := ApplySSHRootLoginDisable()
+	result, err := execute()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -54,17 +64,21 @@ func ExecuteHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func RollbackHandler(w http.ResponseWriter, r *http.Request) {
+	rollbackHandler(w, r, os.Getenv("AGENT_EXECUTION_TOKEN"), RollbackSSHRootLogin)
+}
+
+func rollbackHandler(w http.ResponseWriter, r *http.Request, expectedToken string, rollback func() (ExecutionResult, error)) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	if err := requireExecutionAuthorization(r); err != nil {
+	if err := requireExecutionAuthorization(r, expectedToken); err != nil {
 		http.Error(w, err.Error(), err.status)
 		return
 	}
 
-	result, err := RollbackSSHRootLogin()
+	result, err := rollback()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -85,9 +99,7 @@ func (e *authorizationError) Error() string {
 	return e.message
 }
 
-func requireExecutionAuthorization(r *http.Request) *authorizationError {
-	expected := os.Getenv("AGENT_EXECUTION_TOKEN")
-
+func requireExecutionAuthorization(r *http.Request, expected string) *authorizationError {
 	if expected == "" {
 		return &authorizationError{
 			status:  http.StatusServiceUnavailable,
@@ -116,5 +128,15 @@ func requireExecutionAuthorization(r *http.Request) *authorizationError {
 		}
 	}
 
+	return nil
+}
+
+func requireJSONEnd(decoder *json.Decoder) error {
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return errors.New("unexpected trailing JSON value")
+	} else if err != io.EOF {
+		return err
+	}
 	return nil
 }
