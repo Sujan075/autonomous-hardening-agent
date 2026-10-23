@@ -5,6 +5,66 @@ import (
 	"testing"
 )
 
+func TestParseOSReleaseSupportsQuotedValuesAndShellStyleEscapes(t *testing.T) {
+	tests := []struct {
+		name, input, key, want string
+	}{
+		{name: "single quoted identity", input: "ID='ubuntu'\n", key: "ID", want: "ubuntu"},
+		{name: "single quoted spaces", input: "PRETTY_NAME='Ubuntu 24.04.5 LTS'\n", key: "PRETTY_NAME", want: "Ubuntu 24.04.5 LTS"},
+		{name: "double quoted spaces", input: `PRETTY_NAME="Ubuntu 24.04.5 LTS"` + "\n", key: "PRETTY_NAME", want: "Ubuntu 24.04.5 LTS"},
+		{name: "double quoted escaped shell characters", input: "VALUE=\"dollar \\$HOME quote \\\" slash \\\\ backtick \\`\"\n", key: "VALUE", want: "dollar $HOME quote \" slash \\ backtick `"},
+		{name: "variable text stays literal", input: `VALUE="$ID"` + "\n", key: "VALUE", want: "$ID"},
+		{name: "single quoted backslash stays literal", input: `VALUE='path\segment'` + "\n", key: "VALUE", want: `path\segment`},
+		{name: "escaped unquoted space", input: `VALUE=two\ words` + "\n", key: "VALUE", want: "two words"},
+		{name: "unknown double quote escape preserves backslash", input: `VALUE="keep\q"` + "\n", key: "VALUE", want: `keep\q`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values, err := parseOSRelease([]byte(test.input))
+			if err != nil {
+				t.Fatalf("parseOSRelease() error = %v", err)
+			}
+			if values[test.key] != test.want {
+				t.Fatalf("%s = %q, want %q", test.key, values[test.key], test.want)
+			}
+		})
+	}
+}
+
+func TestParseOSReleaseRejectsMalformedValuesAndAssignments(t *testing.T) {
+	tests := []struct {
+		name, input string
+	}{
+		{name: "unterminated single quote", input: "VALUE='unterminated\n"},
+		{name: "unterminated double quote", input: `VALUE="unterminated`},
+		{name: "trailing quoted escape", input: "VALUE=\"trailing\\"},
+		{name: "text after closing quote", input: `VALUE="valid"suffix`},
+		{name: "concatenated quoted fragments", input: `VALUE="first""second"`},
+		{name: "malformed assignment", input: "ID=ubuntu\nnot-an-assignment\n"},
+		{name: "invalid assignment key", input: "1ID=ubuntu\n"},
+		{name: "duplicate key", input: "ID=ubuntu\nID=other\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if values, err := parseOSRelease([]byte(test.input)); err == nil {
+				t.Fatalf("parseOSRelease() = %#v, want error", values)
+			}
+		})
+	}
+}
+
+func TestAssessHostDispatchesSingleQuotedUbuntuIdentity(t *testing.T) {
+	called := false
+	result := assessHost("linux", "arm64", []byte("ID='ubuntu'\nVERSION_ID='24.04'\nPRETTY_NAME='Ubuntu 24.04.5 LTS'\n"), nil,
+		func() ([]byte, []byte, error) {
+			called = true
+			return []byte(compliantSSHDOutput), nil, nil
+		})
+	if !called || result.Platform != PlatformUbuntu || len(result.Findings) != 4 {
+		t.Fatalf("single-quoted identity did not dispatch supported assessment: called=%v assessment=%#v", called, result)
+	}
+}
+
 func TestAssessHostDispatchesOnlySupportedUbuntuCatalog(t *testing.T) {
 	called := false
 	result := assessHost("linux", "arm64", []byte("ID=ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\n"), nil,
