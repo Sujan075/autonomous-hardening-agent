@@ -194,6 +194,35 @@ class PolicyCatalogDefinition(Base):
     enabled: Mapped[bool] = mapped_column(nullable=False, default=False)
 
 
+class PolicyReviewRecord(Base):
+    """Append-only review decision bound to one exact definition and source pin."""
+
+    __tablename__ = "policy_review_records"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('approved', 'rejected', 'revoked')",
+            name="ck_policy_review_decision",
+        ),
+        Index("ix_policy_review_policy_time", "policy_definition_id", "reviewed_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    policy_definition_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("policy_catalog_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    decision: Mapped[str] = mapped_column(String(24), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewer_issuer: Mapped[str] = mapped_column(String(512), nullable=False)
+    reviewer_subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    reviewed_definition_sha256: Mapped[str] = mapped_column(String(71), nullable=False)
+    reviewed_source_evidence_sha256: Mapped[str | None] = mapped_column(String(71), nullable=True)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    catalog_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    provenance_reference: Mapped[str] = mapped_column(String(512), nullable=False)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class TargetPolicyAssignment(Base):
     __tablename__ = "target_policy_assignments"
 
@@ -201,6 +230,79 @@ class TargetPolicyAssignment(Base):
     definition_id: Mapped[int] = mapped_column(Integer, ForeignKey("policy_catalog_definitions.id", ondelete="RESTRICT"), nullable=False)
     binding_generation: Mapped[str] = mapped_column(String(36), nullable=False)
     state: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
+
+
+class EnrollmentChallengeState(StrEnum):
+    PENDING = "pending"
+    CONSUMED = "consumed"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+
+
+class EnrollmentChallenge(Base):
+    """One-time bootstrap challenge; only its SHA-256 digest is persisted."""
+
+    __tablename__ = "enrollment_challenges"
+    __table_args__ = (
+        UniqueConstraint("enrollment_id", name="uq_enrollment_challenge_id"),
+        UniqueConstraint("target_id", "expected_agent_id", name="uq_enrollment_target_agent"),
+        UniqueConstraint("bootstrap_token_sha256", name="uq_enrollment_bootstrap_hash"),
+        CheckConstraint(
+            "state IN ('pending', 'consumed', 'revoked', 'expired')",
+            name="ck_enrollment_challenge_state",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    enrollment_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    target_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("targets.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    expected_agent_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("agent_identities.agent_id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    workload_identity_uri: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    requester_issuer: Mapped[str] = mapped_column(String(512), nullable=False)
+    requester_subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    bootstrap_token_sha256: Mapped[str] = mapped_column(String(71), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(24), nullable=False, default=EnrollmentChallengeState.PENDING.value
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditChainHead(Base):
+    __tablename__ = "security_audit_chain_head"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+
+
+class SecurityAuditEvent(Base):
+    __tablename__ = "security_audit_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_security_audit_event_id"),
+        UniqueConstraint("event_digest", name="uq_security_audit_event_digest"),
+        Index("ix_security_audit_event_type_time", "event_type", "occurred_at"),
+    )
+
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    actor_issuer: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    actor_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    enrollment_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    policy_definition_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False)
+    previous_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    event_digest: Mapped[str] = mapped_column(String(71), nullable=False)
 
 
 # SQLite's create_all adds this new table to an existing database without
@@ -214,6 +316,42 @@ event.listen(
         "CREATE TRIGGER IF NOT EXISTS assessment_observations_no_update "
         "BEFORE UPDATE ON assessment_observations BEGIN "
         "SELECT RAISE(ABORT, 'assessment observations are immutable'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    SecurityAuditEvent.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER IF NOT EXISTS security_audit_events_no_update "
+        "BEFORE UPDATE ON security_audit_events BEGIN "
+        "SELECT RAISE(ABORT, 'security audit events are append-only'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    PolicyReviewRecord.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER IF NOT EXISTS policy_review_records_no_update "
+        "BEFORE UPDATE ON policy_review_records BEGIN "
+        "SELECT RAISE(ABORT, 'policy review records are append-only'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    PolicyReviewRecord.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER IF NOT EXISTS policy_review_records_no_delete "
+        "BEFORE DELETE ON policy_review_records BEGIN "
+        "SELECT RAISE(ABORT, 'policy review records are append-only'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    SecurityAuditEvent.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER IF NOT EXISTS security_audit_events_no_delete "
+        "BEFORE DELETE ON security_audit_events BEGIN "
+        "SELECT RAISE(ABORT, 'security audit events are append-only'); END"
     ).execute_if(dialect="sqlite"),
 )
 event.listen(

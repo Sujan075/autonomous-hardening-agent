@@ -99,6 +99,7 @@ def store_assessment_observation(
     reported_agent_id: str | None = None,
     authenticated_peer: AuthenticatedAgentPeer | None = None,
     collected_at: datetime | None = None,
+    commit: bool = True,
 ) -> AssessmentObservation:
     """Validate and append an agent response under Controller target context.
 
@@ -181,8 +182,10 @@ def store_assessment_observation(
             trust_status=trust_status,
         )
         db.add(row)
-        db.commit()
-        db.refresh(row)
+        db.flush()
+        if commit:
+            db.commit()
+            db.refresh(row)
         return row
     except BindingValidationError as exc:
         raise ObservationRejected(str(exc)) from exc

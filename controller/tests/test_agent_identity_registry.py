@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,6 +14,7 @@ from app.agents.identity import (
     replace_agent_identity, revoke_agent,
 )
 from app.db.models import AgentIdentity, Base, Target, TargetPolicyAssignment
+from app.auth.oidc import Principal
 from app.assessments.provenance import (
     ObservationRejected, SupportedBindingVersions,
     resolve_assessment_observation, resolve_assigned_assessment_observation,
@@ -21,6 +24,8 @@ from app.policies.registry import (
     RegistryError, assign_policy_to_target, canonical_definition,
     register_definition, resolve_target_assignment, revoke_definition,
 )
+from app.policies.review import review_policy_definition
+from app.policies.trust import PolicyTrustPin
 
 NOW = datetime.now(timezone.utc)
 FINGERPRINT = "sha256:" + "a" * 64
@@ -28,6 +33,7 @@ FINGERPRINT = "sha256:" + "a" * 64
 
 class IdentityRegistryTests(unittest.TestCase):
     def setUp(self):
+        self.original_policy_pins = os.environ.get("POLICY_REVIEW_TRUST_PINS_JSON")
         self.tempdir = tempfile.TemporaryDirectory()
         path = Path(self.tempdir.name) / "ephemeral.sqlite"
         self.engine = create_engine(f"sqlite:///{path}")
@@ -46,9 +52,44 @@ class IdentityRegistryTests(unittest.TestCase):
         self.db.commit()
 
     def tearDown(self):
+        if self.original_policy_pins is None:
+            os.environ.pop("POLICY_REVIEW_TRUST_PINS_JSON", None)
+        else:
+            os.environ["POLICY_REVIEW_TRUST_PINS_JSON"] = self.original_policy_pins
         self.db.close()
         self.engine.dispose()
         self.tempdir.cleanup()
+
+    def review_for_test(self, row):
+        source_digest = "sha256:" + "9" * 64
+        pin = PolicyTrustPin(
+            provenance_reference=row.provenance_reference,
+            source_evidence_sha256=source_digest,
+            definition_sha256=row.definition_sha256,
+            platform=row.platform,
+            policy_version=row.policy_version,
+            catalog_version=row.catalog_version,
+            applicability_confirmed=True,
+        )
+        os.environ["POLICY_REVIEW_TRUST_PINS_JSON"] = json.dumps([{
+            "provenance_reference": pin.provenance_reference,
+            "source_evidence_sha256": pin.source_evidence_sha256,
+            "definition_sha256": pin.definition_sha256,
+            "platform": pin.platform,
+            "policy_version": pin.policy_version,
+            "catalog_version": pin.catalog_version,
+            "applicability_confirmed": True,
+        }])
+        return review_policy_definition(
+            self.db,
+            definition_id=row.id,
+            decision="approved",
+            rationale="isolated registry fixture",
+            source_evidence_sha256=source_digest,
+            reviewer=Principal("https://reviewer.example", "test-reviewer", frozenset({"policy-reviewer"})),
+            trust_pins=(pin,),
+            now=NOW,
+        )
 
     def add_agent(self, agent_id, fingerprint=FINGERPRINT):
         create_pending_agent(
@@ -92,10 +133,7 @@ class IdentityRegistryTests(unittest.TestCase):
             self.db, platform="ubuntu", policy_version="p1", catalog_version="c1",
             definition={"controls": ["SSH-1"]}, provenance_reference="prototype:local",
         )
-        row.verification_status = "verified"
-        row.applicability_status = "confirmed"
-        row.enabled = True
-        self.db.commit()
+        self.review_for_test(row)
         assignment = assign_policy_to_target(
             self.db, target_id=self.target.id, definition_id=row.id
         )
@@ -220,10 +258,7 @@ class IdentityRegistryTests(unittest.TestCase):
             self.db, platform="windows", policy_version="p1", catalog_version="c1",
             definition={"controls": []}, provenance_reference="fixture:test-only",
         )
-        row.verification_status = "verified"
-        row.applicability_status = "confirmed"
-        row.enabled = True
-        self.db.commit()
+        self.review_for_test(row)
         with self.assertRaises(RegistryError):
             assign_policy_to_target(self.db, target_id=self.target.id, definition_id=row.id)
 
@@ -237,10 +272,7 @@ class IdentityRegistryTests(unittest.TestCase):
             self.db, platform="ubuntu", policy_version="p1", catalog_version="c1",
             definition={"controls": ["SSH-1"]}, provenance_reference="fixture:reviewed",
         )
-        row.verification_status = "verified"
-        row.applicability_status = "confirmed"
-        row.enabled = True
-        self.db.commit()
+        self.review_for_test(row)
         assign_policy_to_target(self.db, target_id=self.target.id, definition_id=row.id)
         revoke_definition(self.db, definition_id=row.id)
         self.assertEqual(self.db.get(TargetPolicyAssignment, self.target.id).state, "stale")
@@ -258,12 +290,7 @@ class IdentityRegistryTests(unittest.TestCase):
             catalog_version="catalog-v1", definition={"controls": ["SSH-1"]},
             provenance_reference="fixture:verified-source",
         )
-        # The fixture simulates an external review outcome. Production entry
-        # creation itself always starts disabled, unverified and unconfirmed.
-        definition.verification_status = "verified"
-        definition.applicability_status = "confirmed"
-        definition.enabled = True
-        self.db.commit()
+        self.review_for_test(definition)
         assign_policy_to_target(self.db, target_id=self.target.id, definition_id=definition.id)
         row = store_assessment_observation(
             self.db, target=self.target,

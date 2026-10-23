@@ -21,8 +21,7 @@ def create_target(db: Session, data: TargetCreate) -> Target:
     )
 
     db.add(target)
-    db.commit()
-    db.refresh(target)
+    db.flush()
 
     return target
 

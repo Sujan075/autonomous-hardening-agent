@@ -9,15 +9,22 @@ from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from app.audit.service import append_event
 from app.db.models import (
     AgentCredential,
     AgentCredentialState,
     AgentIdentity,
     AgentIdentityState,
     PolicyCatalogDefinition,
+    PolicyReviewRecord,
     Target,
     TargetAgentBinding,
     TargetPolicyAssignment,
+)
+from app.policies.trust import (
+    PolicyTrustConfigurationError,
+    load_policy_trust_pins,
+    matching_policy_pin,
 )
 
 
@@ -86,6 +93,18 @@ def register_definition(
     )
     db.add(row)
     try:
+        db.flush()
+        append_event(
+            db,
+            event_type="policy.definition.registered",
+            policy_definition_id=row.id,
+            metadata={
+                "definition_digest": digest,
+                "platform": platform,
+                "policy_version": policy_version,
+                "catalog_version": catalog_version,
+            },
+        )
         db.commit()
     except Exception:
         db.rollback()
@@ -127,6 +146,7 @@ def resolve_target_assignment(db: Session, *, target_id: str) -> ResolvedPolicyA
     if definition is None:
         raise RegistryError("assigned policy/catalog definition is missing")
     _validate_definition(definition)
+    _require_current_approval(db, definition)
     if not definition.enabled:
         raise RegistryError("policy/catalog definition is disabled")
     if definition.verification_status != "verified":
@@ -161,6 +181,7 @@ def assign_policy_to_target(db: Session, *, target_id: str, definition_id: int) 
     if definition is None:
         raise RegistryError("policy/catalog definition is unknown")
     _validate_definition(definition)
+    _require_current_approval(db, definition)
     if (
         definition.platform != target.platform
         or definition.verification_status != "verified"
@@ -175,7 +196,19 @@ def assign_policy_to_target(db: Session, *, target_id: str, definition_id: int) 
     assignment.definition_id = definition_id
     assignment.binding_generation = binding.generation
     assignment.state = "active"
-    db.commit()
+    try:
+        db.flush()
+        append_event(
+            db,
+            event_type="policy.assignment.created",
+            target_id=target.id,
+            policy_definition_id=definition.id,
+            metadata={"binding_generation": binding.generation},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(assignment)
     return assignment
 
@@ -186,12 +219,22 @@ def revoke_definition(db: Session, *, definition_id: int) -> None:
         raise RegistryError("policy/catalog definition is unknown")
     definition.verification_status = "revoked"
     definition.enabled = False
-    db.execute(
-        update(TargetPolicyAssignment)
-        .where(TargetPolicyAssignment.definition_id == definition_id)
-        .values(state="stale")
-    )
-    db.commit()
+    try:
+        db.execute(
+            update(TargetPolicyAssignment)
+            .where(TargetPolicyAssignment.definition_id == definition_id)
+            .values(state="stale")
+        )
+        append_event(
+            db,
+            event_type="policy.definition.revoked",
+            policy_definition_id=definition.id,
+            metadata={"definition_digest": definition.definition_sha256},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 def _validate_definition(row: PolicyCatalogDefinition) -> None:
@@ -202,6 +245,42 @@ def _validate_definition(row: PolicyCatalogDefinition) -> None:
     canonical, digest = canonical_definition(definition)
     if canonical != row.definition_json or digest != row.definition_sha256:
         raise RegistryError("stored policy/catalog definition integrity check failed")
+
+
+def _require_current_approval(db: Session, row: PolicyCatalogDefinition) -> PolicyReviewRecord:
+    review = db.scalar(
+        select(PolicyReviewRecord)
+        .where(PolicyReviewRecord.policy_definition_id == row.id)
+        .order_by(PolicyReviewRecord.id.desc())
+        .limit(1)
+    )
+    if (
+        review is None
+        or review.decision != "approved"
+        or review.reviewed_definition_sha256 != row.definition_sha256
+        or review.platform != row.platform
+        or review.policy_version != row.policy_version
+        or review.catalog_version != row.catalog_version
+        or review.provenance_reference != row.provenance_reference
+        or review.reviewed_source_evidence_sha256 is None
+    ):
+        raise RegistryError("policy has no current digest-bound approval review")
+    try:
+        pins = load_policy_trust_pins()
+    except PolicyTrustConfigurationError as exc:
+        raise RegistryError("policy trust verification is not configured") from exc
+    pin = matching_policy_pin(
+        pins,
+        provenance_reference=row.provenance_reference,
+        source_evidence_sha256=review.reviewed_source_evidence_sha256,
+        definition_sha256=row.definition_sha256,
+        platform=row.platform,
+        policy_version=row.policy_version,
+        catalog_version=row.catalog_version,
+    )
+    if pin is None or row.applicability_status != "confirmed" or row.verification_status != "verified":
+        raise RegistryError("policy review trust pin or applicability is no longer valid")
+    return review
 
 
 def _required(value: str, label: str, limit: int) -> None:
