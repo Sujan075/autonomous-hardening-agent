@@ -11,13 +11,10 @@ func HTTPHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	findings := AssessSSHControls()
+	assessment := AssessCurrentHost()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"platform": "ubuntu",
-		"findings": findings,
-	})
+	_ = json.NewEncoder(w).Encode(assessment)
 }

@@ -10,6 +10,9 @@ import (
 	"strings"
 
 	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/assessment"
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/executor"
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/planner"
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/transport"
 )
 
 type SystemInfo struct {
@@ -37,7 +40,8 @@ func main() {
 		port = "9000"
 	}
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -49,7 +53,7 @@ func main() {
 		})
 	})
 
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -62,9 +66,13 @@ func main() {
 		})
 	})
 
-	http.HandleFunc("/assessment", assessment.HTTPHandler)
+	mux.HandleFunc("/assessment", assessment.HTTPHandler)
 
-	http.HandleFunc("/discovery", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/plan", planner.HTTPHandler)
+	mux.HandleFunc("/execute", executor.ExecuteHandler)
+	mux.HandleFunc("/rollback", executor.RollbackHandler)
+
+	mux.HandleFunc("/discovery", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -87,11 +95,27 @@ func main() {
 		})
 	})
 
-	addr := host + ":" + port
-
-	log.Printf("agent_id=%s listening=%s", agentID, addr)
-
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	server, tlsConfig, err := transport.Server(transport.Config{
+		Host:                 host,
+		Port:                 port,
+		CertFile:             os.Getenv("AGENT_TLS_CERT_FILE"),
+		KeyFile:              os.Getenv("AGENT_TLS_KEY_FILE"),
+		ClientCAFile:         os.Getenv("AGENT_TLS_CLIENT_CA_FILE"),
+		ExpectedControllerID: os.Getenv("AGENT_TLS_CONTROLLER_IDENTITY"),
+	}, mux)
+	if err != nil {
+		log.Fatalf("agent listener configuration rejected: %v", err)
+	}
+	if tlsConfig != nil {
+		server.Handler = transport.ReadOnlyHandler(mux)
+	}
+	log.Printf("agent_id=%s listening=%s tls=%t", agentID, server.Addr, tlsConfig != nil)
+	if tlsConfig != nil {
+		err = server.ListenAndServeTLS("", "")
+	} else {
+		err = server.ListenAndServe()
+	}
+	if err != nil {
 		log.Fatal(err)
 	}
 }
