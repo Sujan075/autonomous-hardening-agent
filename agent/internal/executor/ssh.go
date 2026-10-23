@@ -241,7 +241,11 @@ func validateExecutionState(executionState ExecutionState, expectedPath string) 
 }
 
 func writeDropIn(content string) error {
-	dir := filepath.Dir(SSHDropInPath)
+	return writeDropInAt(SSHDropInPath, content)
+}
+
+func writeDropInAt(path, content string) error {
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
@@ -268,11 +272,19 @@ func writeDropIn(content string) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempPath, SSHDropInPath)
+	return os.Rename(tempPath, path)
 }
 
 func effectivePermitRootLogin() (string, error) {
-	output, err := exec.Command("/usr/sbin/sshd", "-T").Output()
+	return effectivePermitRootLoginWithConfig("")
+}
+
+func effectivePermitRootLoginWithConfig(configPath string) (string, error) {
+	args := []string{"-T"}
+	if configPath != "" {
+		args = append(args, "-f", configPath)
+	}
+	output, err := exec.Command("/usr/sbin/sshd", args...).Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to read effective SSH configuration: %w", err)
 	}
@@ -286,7 +298,15 @@ func effectivePermitRootLogin() (string, error) {
 }
 
 func validateSSHConfig() error {
-	command := exec.Command("/usr/sbin/sshd", "-t")
+	return validateSSHConfigWithConfig("")
+}
+
+func validateSSHConfigWithConfig(configPath string) error {
+	args := []string{"-t"}
+	if configPath != "" {
+		args = append(args, "-f", configPath)
+	}
+	command := exec.Command("/usr/sbin/sshd", args...)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}

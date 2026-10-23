@@ -3,6 +3,7 @@ package executor
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -316,6 +317,200 @@ func TestSuccessfulRestorationVerifiesPriorContentAndExistence(t *testing.T) {
 	if got := contentSHA256(content); got != fileState.ContentSHA {
 		t.Errorf("restored digest = %s, want %s", got, fileState.ContentSHA)
 	}
+	if got := info.Mode().Perm(); got != os.FileMode(fileState.Mode) {
+		t.Errorf("restored mode = %04o, want %04o", got, fileState.Mode)
+	}
+}
+
+func TestApplyUsesRealSSHDValidationAndEffectiveConfigurationInTemporaryTree(t *testing.T) {
+	fixture := newSSHDConfigFixture(t, nil)
+	ops, dropInPath, _ := testOperations(t, []byte("old contents\n"), 0640)
+	if err := os.Remove(dropInPath); err != nil {
+		t.Fatal(err)
+	}
+	ops.dropInPath = fixture.dropInPath
+	ops.statePath = filepath.Join(t.TempDir(), "state", "execution.json")
+	ops.effectivePermitRootLogin = func() (string, error) {
+		return effectivePermitRootLoginWithConfig(fixture.configPath)
+	}
+	ops.writeDropIn = func(content string) error { return writeDropInAt(fixture.dropInPath, content) }
+	ops.validateSSHConfig = func() error { return validateSSHConfigWithConfig(fixture.configPath) }
+	ops.reloadSSH = func() error { return nil }
+	ops.captureFile = state.CaptureFile
+	ops.saveState = saveExecutionState
+	ops.verifyRestoredFile = verifyRestoredFile
+
+	result, err := applySSHRootLoginDisable(ops)
+	if err != nil {
+		t.Fatalf("apply with temporary sshd config: %v", err)
+	}
+	if result.Status != "VERIFIED" || result.After != "no" {
+		t.Fatalf("result = %+v, want verified effective PermitRootLogin no", result)
+	}
+	if err := validateSSHConfigWithConfig(fixture.configPath); err != nil {
+		t.Fatalf("sshd -t rejected resulting temporary configuration: %v", err)
+	}
+	effective, err := effectivePermitRootLoginWithConfig(fixture.configPath)
+	if err != nil || effective != "no" {
+		t.Fatalf("sshd -T effective PermitRootLogin = %q, %v; want no", effective, err)
+	}
+}
+
+func TestEarlierSSHDDirectiveWinsAndExecutorRecoversInsteadOfReportingSuccess(t *testing.T) {
+	fixture := newSSHDConfigFixture(t, map[string]string{"00-site-policy.conf": "PermitRootLogin yes\n"})
+	ops, originalDropIn, _ := testOperations(t, []byte("old contents\n"), 0640)
+	if err := os.Remove(originalDropIn); err != nil {
+		t.Fatal(err)
+	}
+	ops.dropInPath = fixture.dropInPath
+	ops.statePath = filepath.Join(t.TempDir(), "state", "execution.json")
+	ops.effectivePermitRootLogin = func() (string, error) {
+		return effectivePermitRootLoginWithConfig(fixture.configPath)
+	}
+	ops.writeDropIn = func(content string) error { return writeDropInAt(fixture.dropInPath, content) }
+	ops.validateSSHConfig = func() error { return validateSSHConfigWithConfig(fixture.configPath) }
+	ops.reloadSSH = func() error { return nil }
+	ops.captureFile = state.CaptureFile
+	ops.saveState = saveExecutionState
+	ops.restoreFile = state.RestoreFile
+	ops.verifyRestoredFile = verifyRestoredFile
+
+	before, err := effectivePermitRootLoginWithConfig(fixture.configPath)
+	if err != nil || before != "yes" {
+		t.Fatalf("fixture effective PermitRootLogin = %q, %v; want earlier yes", before, err)
+	}
+	result, err := applySSHRootLoginDisable(ops)
+	if err == nil || !strings.Contains(err.Error(), "expected permitrootlogin=no, got yes") {
+		t.Fatalf("apply error = %v, want explicit effective-value mismatch", err)
+	}
+	if result.Status == "VERIFIED" {
+		t.Fatal("precedence conflict was reported as verified")
+	}
+	if !strings.Contains(err.Error(), "automatic rollback succeeded and effective state was verified") {
+		t.Fatalf("failure did not report verified recovery: %v", err)
+	}
+	if _, statErr := os.Stat(fixture.dropInPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("agent drop-in remains after failed verification/recovery: stat error %v", statErr)
+	}
+	after, err := effectivePermitRootLoginWithConfig(fixture.configPath)
+	if err != nil || after != "yes" {
+		t.Fatalf("recovered effective PermitRootLogin = %q, %v; want yes", after, err)
+	}
+}
+
+func TestApplyFailuresAttemptAndVerifyRecovery(t *testing.T) {
+	tests := []struct {
+		name      string
+		inject    func(*testing.T, *sshOperations, string) error
+		wantError string
+	}{
+		{
+			name: "partial file write",
+			inject: func(t *testing.T, ops *sshOperations, path string) error {
+				ops.writeDropIn = func(string) error {
+					if err := os.WriteFile(path, []byte("partial write\n"), 0600); err != nil {
+						return err
+					}
+					return errors.New("injected file write failure")
+				}
+				return nil
+			},
+			wantError: "injected file write failure",
+		},
+		{
+			name: "configuration validation",
+			inject: func(t *testing.T, ops *sshOperations, _ string) error {
+				calls := 0
+				ops.validateSSHConfig = func() error {
+					calls++
+					if calls == 1 {
+						return errors.New("injected sshd validation failure")
+					}
+					return nil
+				}
+				return nil
+			},
+			wantError: "injected sshd validation failure",
+		},
+		{
+			name: "service reload",
+			inject: func(t *testing.T, ops *sshOperations, _ string) error {
+				calls := 0
+				ops.reloadSSH = func() error {
+					calls++
+					if calls == 1 {
+						return errors.New("injected ssh reload failure")
+					}
+					return nil
+				}
+				return nil
+			},
+			wantError: "injected ssh reload failure",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := []byte("PermitRootLogin yes\n")
+			ops, path, _ := testOperations(t, original, 0640)
+			if err := tt.inject(t, &ops, path); err != nil {
+				t.Fatal(err)
+			}
+			result, err := applySSHRootLoginDisable(ops)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("apply error = %v, want %q", err, tt.wantError)
+			}
+			if result.Status == "VERIFIED" || !strings.Contains(err.Error(), "automatic rollback succeeded and effective state was verified") {
+				t.Fatalf("failed apply/recovery result = %+v, error %v", result, err)
+			}
+			got, readErr := os.ReadFile(path)
+			if readErr != nil || string(got) != string(original) {
+				t.Fatalf("drop-in after automatic recovery = %q, %v; want original", got, readErr)
+			}
+			info, statErr := os.Stat(path)
+			if statErr != nil || info.Mode().Perm() != 0640 {
+				t.Fatalf("drop-in mode after automatic recovery = %v, %v; want 0640", info, statErr)
+			}
+		})
+	}
+}
+
+type sshdConfigFixture struct {
+	configPath string
+	dropInPath string
+}
+
+func newSSHDConfigFixture(t *testing.T, earlierFiles map[string]string) sshdConfigFixture {
+	t.Helper()
+	if _, err := os.Stat("/usr/sbin/sshd"); err != nil {
+		t.Skipf("/usr/sbin/sshd unavailable: %v", err)
+	}
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skipf("ssh-keygen unavailable: %v", err)
+	}
+	root := t.TempDir()
+	confDir := filepath.Join(root, "sshd_config.d")
+	if err := os.Mkdir(confDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range earlierFiles {
+		if err := os.WriteFile(filepath.Join(confDir, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keyPath := filepath.Join(root, "host_key")
+	if output, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput(); err != nil {
+		t.Fatalf("generate temporary sshd host key: %s: %v", output, err)
+	}
+	dropInPath := filepath.Join(confDir, "99-autonomous-hardening-agent.conf")
+	configPath := filepath.Join(root, "sshd_config")
+	config := "Port 22222\nListenAddress 127.0.0.1\nHostKey " + keyPath + "\nPidFile " + filepath.Join(root, "sshd.pid") + "\nInclude " + filepath.Join(confDir, "*.conf") + "\n"
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSSHConfigWithConfig(configPath); err != nil {
+		t.Fatalf("sshd -t rejected temporary fixture: %v", err)
+	}
+	return sshdConfigFixture{configPath: configPath, dropInPath: dropInPath}
 }
 
 func testOperations(t *testing.T, initialContent []byte, mode os.FileMode) (sshOperations, string, string) {
