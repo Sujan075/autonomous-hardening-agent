@@ -25,6 +25,27 @@ class AssessmentPolicyError(ValueError):
 
 
 @dataclass(frozen=True)
+class PolicyEvaluation:
+    """Deterministic result for one exact, reviewed policy/assessment match.
+
+    A collection can be valid while its findings are incomplete or uncertain.
+    Those cases are represented as INDETERMINATE and can never imply
+    compliance.
+    """
+
+    decision: str
+    reasons: tuple[str, ...]
+    controls: tuple[dict[str, str], ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "decision": self.decision,
+            "reasons": list(self.reasons),
+            "controls": [dict(control) for control in self.controls],
+        }
+
+
+@dataclass(frozen=True)
 class ResolvedAssessmentPolicy:
     assignment: ResolvedPolicyAssignment
     definition_id: int
@@ -115,6 +136,82 @@ def validate_assessment_matches_policy(
     if actual != policy.controls:
         raise AssessmentPolicyError("agent assessment controls do not match assigned policy")
     return assessment
+
+
+def evaluate_assessment(policy: ResolvedAssessmentPolicy, assessment: Assessment) -> PolicyEvaluation:
+    """Evaluate findings only after exact policy matching and fail closed.
+
+    The agent's finding status is cross-checked against the observed and
+    expected values. Evidence must identify the same source and observed
+    value. ERROR, UNKNOWN, malformed or incomplete evidence is reported as
+    INDETERMINATE rather than compliant.
+    """
+    if assessment.platform != policy.assignment.platform:
+        raise AssessmentPolicyError("assessment platform does not match resolved policy")
+    actual = tuple((finding.control_id, finding.expected_value) for finding in assessment.findings)
+    if actual != policy.controls:
+        raise AssessmentPolicyError("assessment controls do not match resolved policy")
+
+    rows: list[dict[str, str]] = []
+    reasons: list[str] = []
+    has_failure = False
+    indeterminate = False
+    for finding in assessment.findings:
+        issue = ""
+        if finding.error is not None or finding.status in {"ERROR", "UNKNOWN"}:
+            issue = "finding collection returned an error or unknown status"
+        elif finding.applicability != "APPLICABLE":
+            issue = "finding applicability is not confirmed as applicable"
+        elif not finding.current_value or not finding.expected_value or not finding.source:
+            issue = "finding is missing observed, expected, or source data"
+        elif not _evidence_supports_finding(finding):
+            issue = "finding evidence does not substantiate its observed value and source"
+        elif finding.status == "PASS" and finding.current_value != finding.expected_value:
+            issue = "PASS status conflicts with observed and expected values"
+        elif finding.status == "FAIL" and finding.current_value == finding.expected_value:
+            issue = "FAIL status conflicts with observed and expected values"
+        elif finding.status not in {"PASS", "FAIL"}:
+            issue = "finding status is unsupported"
+
+        if issue:
+            indeterminate = True
+            reasons.append(f"{finding.control_id}: {issue}")
+        elif finding.status == "FAIL":
+            has_failure = True
+            reasons.append(f"{finding.control_id}: observed value differs from policy")
+        else:
+            reasons.append(f"{finding.control_id}: observed value matches policy")
+        rows.append({
+            "control_id": finding.control_id,
+            "status": finding.status,
+            "observed_value": finding.current_value,
+            "expected_value": finding.expected_value,
+            "source": finding.source,
+        })
+
+    decision = "INDETERMINATE" if indeterminate else "NON_COMPLIANT" if has_failure else "COMPLIANT"
+    return PolicyEvaluation(decision=decision, reasons=tuple(reasons), controls=tuple(rows))
+
+
+def _evidence_supports_finding(finding: object) -> bool:
+    evidence = getattr(finding, "evidence", ())
+    if not evidence:
+        return False
+    seen: set[tuple[str, str]] = set()
+    matched_observation = False
+    for item in evidence:
+        name = getattr(item, "name", "")
+        value = getattr(item, "value", "")
+        source = getattr(item, "source", "")
+        if not name or not value or not source:
+            return False
+        key = (name, source)
+        if key in seen:
+            return False
+        seen.add(key)
+        if source == finding.source and value == finding.current_value:
+            matched_observation = True
+    return matched_observation
 
 
 def _bounded_text(value: object, label: str, maximum: int) -> str:

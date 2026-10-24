@@ -20,6 +20,7 @@ from app.audit.service import AuditError, append_event
 from app.approvals.bindings import parse_assessment_json
 from app.assessments.policy import (
     AssessmentPolicyError,
+    evaluate_assessment,
     resolve_assessment_policy,
     validate_assessment_matches_policy,
 )
@@ -138,6 +139,7 @@ def assessment(
             discovery=discovery,
             raw_assessment=raw_payload,
         )
+        policy_evaluation = evaluate_assessment(policy, parsed_assessment)
         payload = json.loads(raw_payload.decode("utf-8", errors="strict"))
         observation = store_assessment_observation(
             db,
@@ -164,6 +166,7 @@ def assessment(
                 "definition_digest": policy.assignment.definition_digest,
                 "trust_status": observation.trust_status,
                 "finding_count": len(parsed_assessment.findings),
+                "policy_decision": policy_evaluation.decision,
             },
         )
         observation_id = observation.observation_id
@@ -219,6 +222,7 @@ def assessment(
             "agent_channel_authenticated": authenticated_peer is not None,
             "planning_recommendations": "available_separately_at_plan_endpoint",
         },
+        "policy_evaluation": policy_evaluation.as_dict(),
     }
 
 

@@ -17,7 +17,7 @@ from app.agents.identity import (
     bind_target_to_agent, create_pending_agent,
 )
 from app.assessments.policy import (
-    ASSESSMENT_POLICY_SCHEMA, AssessmentPolicyError, resolve_assessment_policy,
+    ASSESSMENT_POLICY_SCHEMA, AssessmentPolicyError, evaluate_assessment, resolve_assessment_policy,
     validate_assessment_matches_policy,
 )
 from app.auth.oidc import Principal, require_target_read
@@ -41,6 +41,7 @@ ASSESSMENT = {
         "control_id": "TEST-SSH-1", "title": "Test SSH control", "status": "PASS",
         "applicability": "APPLICABLE", "severity": "INFO", "current_value": "no",
         "expected_value": "no", "message": "test fixture", "source": "test-only",
+        "evidence": [{"name": "TestSetting", "value": "no", "source": "test-only"}],
     }],
 }
 DISCOVERY = {
@@ -163,6 +164,8 @@ class AssessmentPolicyIntegrationTests(unittest.TestCase):
         result = response.json()
         self.assertEqual(result["assessment"], ASSESSMENT)
         self.assertEqual(result["policy_status"], "reviewed_assignment_matched_to_agent_reported_result")
+        self.assertEqual(result["policy_evaluation"]["decision"], "COMPLIANT")
+        self.assertEqual(result["policy_evaluation"]["controls"][0]["observed_value"], "no")
         self.assertEqual(result["policy"]["definition_digest"], row.definition_sha256)
         self.assertEqual(result["policy"]["os_version"], OS_VERSION)
         self.assertFalse(result["policy"]["agent_channel_authenticated"])
@@ -259,8 +262,75 @@ class AssessmentPolicyIntegrationTests(unittest.TestCase):
         mutated["findings"][0]["expected_value"] = "yes"
         with self.assertRaises(AssessmentPolicyError):
             validate_assessment_matches_policy(policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(mutated))
+        missing = {"platform": "ubuntu", "findings": []}
+        with self.assertRaises(AssessmentPolicyError):
+            validate_assessment_matches_policy(policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(missing))
+        unexpected = json.loads(json.dumps(ASSESSMENT))
+        unexpected["findings"].append({**unexpected["findings"][0], "control_id": "UNEXPECTED"})
+        with self.assertRaises(AssessmentPolicyError):
+            validate_assessment_matches_policy(policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(unexpected))
         with self.assertRaises(AssessmentPolicyError):
             validate_assessment_matches_policy(policy, target=self.target, discovery={**DISCOVERY, "architecture": "amd64"}, raw_assessment=json.dumps(ASSESSMENT))
+
+    def test_policy_evaluation_distinguishes_noncompliant_and_uncertain_findings(self):
+        self.make_policy()
+        policy = resolve_assessment_policy(self.db, target=self.target)
+
+        failing = json.loads(json.dumps(ASSESSMENT))
+        finding = failing["findings"][0]
+        finding.update(status="FAIL", current_value="yes")
+        finding["evidence"][0]["value"] = "yes"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(failing)
+        )
+        decision = evaluate_assessment(policy, assessment)
+        self.assertEqual(decision.decision, "NON_COMPLIANT")
+
+        unknown = json.loads(json.dumps(ASSESSMENT))
+        unknown["findings"][0]["status"] = "UNKNOWN"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(unknown)
+        )
+        decision = evaluate_assessment(policy, assessment)
+        self.assertEqual(decision.decision, "INDETERMINATE")
+        self.assertTrue(any("unknown status" in reason for reason in decision.reasons))
+
+        errored = json.loads(json.dumps(ASSESSMENT))
+        errored["findings"][0].update(status="ERROR", error={
+            "code": "COLLECTION_FAILED", "message": "fixture failure", "source": "test-only",
+        })
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(errored)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).decision, "INDETERMINATE")
+
+    def test_policy_evaluation_rejects_unsubstantiated_or_contradictory_evidence(self):
+        self.make_policy()
+        policy = resolve_assessment_policy(self.db, target=self.target)
+
+        malformed = json.loads(json.dumps(ASSESSMENT))
+        malformed["findings"][0]["evidence"][0]["value"] = "yes"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(malformed)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).decision, "INDETERMINATE")
+
+        duplicate_evidence = json.loads(json.dumps(ASSESSMENT))
+        duplicate_evidence["findings"][0]["evidence"].append(
+            duplicate_evidence["findings"][0]["evidence"][0]
+        )
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(duplicate_evidence)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).decision, "INDETERMINATE")
+
+        contradictory = json.loads(json.dumps(ASSESSMENT))
+        contradictory["findings"][0]["current_value"] = "yes"
+        contradictory["findings"][0]["evidence"][0]["value"] = "yes"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(contradictory)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).decision, "INDETERMINATE")
 
     def test_agent_failure_or_malformed_result_creates_no_success_audit_or_observation(self):
         self.make_policy()

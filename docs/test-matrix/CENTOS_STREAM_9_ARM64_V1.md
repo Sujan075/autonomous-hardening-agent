@@ -19,19 +19,39 @@ The evaluator runs the fixed command `/usr/bin/sudo -n /usr/sbin/sshd -T`, reads
 
 These rules are a project-defined SSH baseline. No CentOS CIS control IDs, benchmark version, authoritative benchmark mapping, or formal compliance claim is assigned.
 
-## Acceptance matrix
+## Lifecycle acceptance matrix
 
-| Scenario | Expected result | Level |
-|---|---|---|
-| Exact CentOS Stream 9 ARM64 identity | Four findings from the CentOS catalog | Unit |
-| Wrong distribution/version/architecture or inconsistent, incomplete, malformed identity | UNKNOWN; SSH runner not called | Unit |
-| Each directive equals its expected value | Corresponding control PASS with matching evidence | Unit |
-| Each directive differs, including `PermitRootLogin without-password` | Corresponding control FAIL; other findings remain independent | Unit |
-| Missing, duplicate, malformed or incomplete required directive | One normalized assessment ERROR; no PASS | Unit |
-| `sudo -n` denial or command exit failure | Normalized assessment ERROR; no PASS | Unit |
-| Catalog identity, provenance, evidence and verification metadata | Stable CentOS IDs and project-defined provenance; no benchmark claims or remediation | Unit |
-| Incomplete, uncertain, passing, or failing CentOS assessment reaches planner | BLOCKED plan with empty actions | Unit |
-| Ubuntu assessment and `ACT-SSH-5.1.20` planning | Existing four-control behavior preserved | Unit regression |
+`PASS` below means the named automated test passed at its stated evidence level. It does not promote isolated tests into Controller integration, sandbox execution, or live CentOS remediation. End-to-end actions that do not exist remain `NOT RUN`.
+
+| # | Scenario | Expected result | Exact test or command | Level | Actual result / evidence | Status |
+|---:|---|---|---|---|---|---|
+| 1 | Exact CentOS Stream 9 ARM64 dispatch | Four CentOS findings; fixed evaluator called | `cd agent && go test ./internal/assessment -run TestAssessHostDispatchesExactCentOSStream9ARM64Identity -count=1` | Unit | Dispatch test passes; [platform_test.go](../../agent/internal/assessment/platform_test.go) | PASS |
+| 2 | Unsupported or malformed OS identity | UNKNOWN; evaluator not called | `cd agent && go test ./internal/assessment -run 'TestAssessHostRejectsCentOSIdentityOutsideExactScope|TestAssessHostRejectsUnsupportedOrIncompleteIdentityBeforeCommands' -count=1` | Unit | Scope and malformed identity tests pass; [platform_test.go](../../agent/internal/assessment/platform_test.go) | PASS |
+| 3 | Compliant four-control assessment | Four PASS findings with matching observed evidence | `cd agent && go test ./internal/assessment -run 'TestCentOSSSHControlsPassAndFailIndependently|TestCentOSMixedFindingsAreIndependent' -count=1` | Unit | Injected CentOS effective-config cases pass; [ssh_test.go](../../agent/internal/assessment/ssh_test.go) | PASS |
+| 4 | Root-login finding | `PermitRootLogin=without-password` is FAIL against project value `no` | `cd agent && go test ./internal/assessment -run TestCentOSRootLoginWithoutPasswordFailsProjectBaseline -count=1` | Unit | Exact regression passes; same evidence file as row 3 | PASS |
+| 5 | Missing, duplicate, malformed SSH evidence | ERROR, never PASS | `cd agent && go test ./internal/assessment -run 'TestCentOSSSHInvalidOutputAndCommandFailureNeverPass|TestAssessSSHControlsMissingOrMalformedOutputReturnsError' -count=1` | Unit | Injected parser/command failure cases pass; [ssh_test.go](../../agent/internal/assessment/ssh_test.go) | PASS |
+| 6 | Policy evaluation rejects missing or unexpected controls | Reject the assessment; no compliant decision | `cd controller && .venv/bin/python -m unittest tests.test_assessment_policy_integration.AssessmentPolicyIntegrationTests.test_assessment_parameters_must_match_exact_ordered_policy_contract` | Unit / Controller fixture | Missing and unexpected findings are rejected against the exact policy control sequence | PASS |
+| 7 | Policy evaluation rejects mismatched expected values | Reject exact assignment/assessment mismatch | `cd controller && .venv/bin/python -m unittest tests.test_assessment_policy_integration.AssessmentPolicyIntegrationTests.test_assessment_parameters_must_match_exact_ordered_policy_contract` | Unit / Controller fixture | Changed expected value and architecture are rejected | PASS |
+| 8 | UNKNOWN/ERROR evidence cannot be compliant | INDETERMINATE, never COMPLIANT | `cd controller && .venv/bin/python -m unittest tests.test_assessment_policy_integration.AssessmentPolicyIntegrationTests.test_policy_evaluation_distinguishes_noncompliant_and_uncertain_findings` | Unit / Controller fixture | UNKNOWN maps to INDETERMINATE; generic policy fixture only, not reviewed CentOS policy | PASS |
+| 9 | Supported CentOS failure produces scoped plan | READY with one exact supported CentOS action | `cd agent && go test ./internal/planner -run TestBuildAssessmentPlanAlwaysBlocksCentOSBaseline -count=1` | Unit | Test confirms CentOS remains BLOCKED with zero actions because no safe CentOS action or trusted execution context exists | NOT RUN |
+| 10 | Incomplete findings produce zero-action plan | BLOCKED with no actions | `cd agent && go test ./internal/planner -run TestBuildAssessmentPlanFailsClosedForIncompleteOrUncertainAssessments -count=1` | Unit | Fail-closed Ubuntu planner regression passes; CentOS is independently always blocked | PASS |
+| 11 | Correct, unexpired, target-bound approval | Signed envelope accepted only for exact configured context | `cd agent && go test ./internal/approval ./internal/privhelper -run 'TestVerifyAcceptsValidEnvelope|TestHelperValidSignedRequestReachesOnlyInjectedFixedOperation' -count=1` | Unit | Verifier/helper acceptance is isolated; no Controller-to-agent approval path | PASS |
+| 12 | Invalid signature, missing trust material, or reviewer role | Reject before operation | `cd agent && go test ./internal/approval ./internal/privhelper -run 'TestVerifyRejectsMalformedAndInvalidSignatures|TestNewVerifierRejectsNonAllowlistedAlgorithmsAndInvalidTrustConfig|TestHelperRejectsInvalidSignaturesExpiredAndMismatchedClaimsBeforeOperation' -count=1` | Unit | Cryptographic configuration/signature rejection passes; Controller reviewer authorization has separate tests | PASS |
+| 13 | Expired or target-mismatched approval | Reject before operation | `cd agent && go test ./internal/approval ./internal/privhelper -run 'TestVerifyEnforcesTimeWindowAndClockSkew|TestHelperRejectsInvalidSignaturesExpiredAndMismatchedClaimsBeforeOperation' -count=1` | Unit | Expiry and context mismatch tests pass | PASS |
+| 14 | Approval/evidence/plan digest mismatch | Reject mutated bindings | `cd agent && go test ./internal/approval ./internal/privhelper -run 'TestPlanBindingMutationsChangeDigest|TestHelperRecomputesBindingsFromConfiguredTypedContext' -count=1` | Unit | Binding mutations are rejected; no operational approval consumer | PASS |
+| 15 | Single-use approval replay | Atomic replay reservation rejects reuse | `cd agent && go test ./internal/privhelper -run 'TestHelperReplayIsAtomicAcrossConcurrencyAndStoreRecreation|TestFileReplayStoreRejectsReplayConflictAndPersistsReservation' -count=1` | Unit | Replay primitive passes with test state; not wired to the running agent | PASS |
+| 16 | Audit failure before mutation | Mutation callback is not invoked | `cd agent && go test ./internal/privhelper -run TestReplayPersistenceFailureAndPreOperationAuditFailurePreventMutation -count=1` | Unit | Injected audit failure blocks operation; no production sink is connected | PASS |
+| 17 | Successful constrained action | Captured state plus independent effective-value verification | `cd agent && go test ./internal/executor -run TestApplyUsesRealSSHDValidationAndEffectiveConfigurationInTemporaryTree -count=1` | Sandbox | Real `sshd` checks use a temporary tree; executor is not enabled for CentOS | PASS |
+| 18 | Syntax error or SSH precedence conflict | No false success; recover or expose recovery failure | `cd agent && go test ./internal/executor -run 'TestEarlierSSHDDirectiveWinsAndExecutorRecoversInsteadOfReportingSuccess|TestApplyFailuresAttemptAndVerifyRecovery' -count=1` | Sandbox / injected failure | Temporary `sshd` precedence and failure cases pass | PASS |
+| 19 | Failed execution restores original state | Independently verify recovered effective value | `cd agent && go test ./internal/executor -run 'TestAutomaticRecoveryEffectiveStateMatchReportsVerifiedRecovery|TestSuccessfulRestorationVerifiesPriorContentAndExistence' -count=1` | Unit / sandbox | Recovery and file state are verified in tests; no live write | PASS |
+| 20 | Failed recovery disposition | Recovery-required/incomplete; never successful rollback | `cd agent && go test ./internal/privhelper ./internal/executor -run 'TestOperationFailureNeverReturnsSuccessAndRetainsRecoveryRequiredStatus|TestRestoreOrVerificationFailureNeverReportsSuccessfulRollback|TestPostOperationAuditFailureIsExplicitlyIncompleteAndCannotBeRetried' -count=1` | Unit | Failure states are explicit in isolated tests; audit/executor workflow is not connected end to end | PASS |
+
+### Suite result at this revision
+
+- Go: `cd agent && go test -count=1 ./...` and `go vet ./...` passed. Unit/sandbox coverage only; no CentOS remediation integration.
+- Controller: `cd controller && .venv/bin/python -m unittest discover -s tests -v` passed all 110 tests. Its local process-level mTLS tests use temporary certificates and disposable state; they do not exercise CentOS remediation.
+- CentOS ARM64 build: `GOOS=linux GOARCH=arm64 go build -o /tmp/aha-centos-stream9-arm64 ./cmd/agent` produced an ELF 64-bit ARM aarch64 Linux executable. New artifact SHA-256: `f41b145fdf0d8114dcd0f0f315127ed71035927cce00de6b7062884b9018050b`. This is distinct from the original live-capture binary SHA-256 `aa2c9ad558ae07afd43d7a7ff99f12d396d6a7e3ecbb39ed7b686a0e68d0937f`.
+- No dashboard source was available on this branch; frontend build and dashboard end-to-end checks are NOT RUN. The teammate-owned dashboard PR remains a separate integration dependency.
 
 ## Captured live read-only result
 

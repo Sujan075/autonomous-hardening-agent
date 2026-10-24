@@ -87,6 +87,10 @@ curl --fail --silent --show-error http://127.0.0.1:19000/plan
 
 Expected: health is `ok`; status is `online`; discovery identifies `ah-centos-01`, Linux, CentOS Stream 9, ARM64, and `192.168.64.3`; assessment returns four findings; plan reports `BLOCKED` with `"actions":[]`. Save the JSON responses with a timestamp and the exact binary SHA-256. Do not interpret the blocked plan as an assessment failure: the planner intentionally has no CentOS remediation actions.
 
+The separate Controller assessment endpoint requires an active target-agent binding and a current reviewed, explicitly versioned policy assignment. When those prerequisites exist, its `policy_evaluation.decision` is `COMPLIANT`, `NON_COMPLIANT`, or `INDETERMINATE`; only matching values with substantiating evidence can be COMPLIANT. `policy_status` reports that the assigned policy matched the agent-reported assessment, not a formal compliance certification. The captured CentOS bundle was collected directly from the agent and does not establish a reviewed Controller policy assignment.
+
+The Controller exposes read-only discovery/status, assessment, and planning routes. It has no execution or rollback routes. The agent's legacy `/execute` and `/rollback` handlers are not an approved human-approval workflow: do not set `AGENT_EXECUTION_TOKEN`, send requests to those endpoints, or use this target for writes.
+
 ## Expected assessment
 
 All findings use source `ssh.effective_config` and evidence from effective `sshd -T` configuration.

@@ -95,8 +95,10 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
             "platform": "ubuntu",
             "findings": [{
                 "control_id": "CIS-1", "title": "SSH setting", "status": "FAIL",
+                "applicability": "APPLICABLE",
                 "severity": "high", "current_value": "yes", "expected_value": "no",
                 "message": "disable root login", "source": "sshd",
+                "evidence": [{"name": "PermitRootLogin", "value": "yes", "source": "sshd"}],
             }],
         }
         discovery_response = httpx.Response(
@@ -136,6 +138,14 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
                 "agent_channel_authenticated": False,
                 "planning_recommendations": "available_separately_at_plan_endpoint",
             },
+            "policy_evaluation": {
+                "decision": "NON_COMPLIANT",
+                "reasons": ["CIS-1: observed value differs from policy"],
+                "controls": [{
+                    "control_id": "CIS-1", "status": "FAIL", "observed_value": "yes",
+                    "expected_value": "no", "source": "sshd",
+                }],
+            },
         })
         self.assertEqual(mock_stream.call_args_list, [
             call("GET", "http://127.0.0.1:19000/discovery", timeout=5.0),
@@ -160,7 +170,12 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
         )
         upstream_response = httpx.Response(
             200,
-            json={"platform": "ubuntu", "findings": []},
+            json={"platform": "ubuntu", "findings": [{
+                "control_id": "CIS-1", "title": "SSH setting", "status": "PASS",
+                "applicability": "APPLICABLE", "severity": "INFO", "current_value": "no",
+                "expected_value": "no", "message": "compliant", "source": "sshd",
+                "evidence": [{"name": "PermitRootLogin", "value": "no", "source": "sshd"}],
+            }]},
             request=httpx.Request("GET", "http://127.0.0.1:19000/assessment"),
         )
         mock_stream.side_effect = [nullcontext(discovery_response), nullcontext(upstream_response)]
