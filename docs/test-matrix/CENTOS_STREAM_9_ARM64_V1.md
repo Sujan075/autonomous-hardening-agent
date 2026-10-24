@@ -51,7 +51,8 @@ These rules are a project-defined SSH baseline. No CentOS CIS control IDs, bench
 - Go: `cd agent && go test -count=1 ./...` and `go vet ./...` passed. Unit/sandbox coverage only; no CentOS remediation integration.
 - Controller: `cd controller && .venv/bin/python -m unittest discover -s tests -v` passed all 110 tests. Its local process-level mTLS tests use temporary certificates and disposable state; they do not exercise CentOS remediation.
 - CentOS ARM64 build: `GOOS=linux GOARCH=arm64 go build -o /tmp/aha-centos-stream9-arm64 ./cmd/agent` produced an ELF 64-bit ARM aarch64 Linux executable. New artifact SHA-256: `f41b145fdf0d8114dcd0f0f315127ed71035927cce00de6b7062884b9018050b`. This is distinct from the original live-capture binary SHA-256 `aa2c9ad558ae07afd43d7a7ff99f12d396d6a7e3ecbb39ed7b686a0e68d0937f`.
-- No dashboard source was available on this branch; frontend build and dashboard end-to-end checks are NOT RUN. The teammate-owned dashboard PR remains a separate integration dependency.
+- Teammate PR #2 was inspected read-only and checked in an isolated worktree at `0bb54d5815a46b0cd3e89b513d4dd104846f5931`. `npm ci`, `npm run check`, and `npm run build` all passed. It calls only `GET /health`, `/api/targets`, `/api/targets/{id}/agent-status`, `/assessment`, and `/plan`; it has no mutation actions and keeps request failures visible. Its assessment parser tolerates the added `policy_evaluation` response field, but the UI does not display that decision. Its CentOS card still says “Detector only · no assessment adapter”, which will be stale when this PR is integrated. The UI maps finding `ERROR` and `UNKNOWN` both to “Unknown”.
+- A running Controller plus browser smoke/end-to-end check is NOT RUN. PR #2 remains teammate-owned and should be updated to show the CentOS assessment and preserve the ERROR/UNKNOWN distinction before integration.
 
 ## Captured live read-only result
 
