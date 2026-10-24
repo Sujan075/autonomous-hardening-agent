@@ -7,6 +7,42 @@ export type Target = {
   created_at?: string
 }
 
+export type DemoRemediationRun = {
+  run_id: string
+  target_id: string
+  platform: string
+  scenario: string
+  status: string
+  sandbox_only: true
+  test_only_trust: true
+  live_target_modified: false
+  recorded_at: string
+  result: Record<string, unknown>
+}
+
+export type DemoDecoyEvent = {
+  event_id: string
+  batch_id: string
+  decoy_id: string
+  occurred_at: string
+  category: string
+  source_address: string
+  source_classification: string
+  correlation_id: string
+  outcome: string
+  simulation_mode: 'SIMULATED'
+}
+
+export type AuditEvent = {
+  sequence: number
+  event_id: string
+  occurred_at: string
+  event_type: string
+  target_id: string | null
+  metadata: Record<string, unknown>
+  event_digest: string
+}
+
 const base = (import.meta.env.VITE_CONTROLLER_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const token = import.meta.env.VITE_API_TOKEN
 
@@ -63,13 +99,27 @@ export async function getAgentStatus(targetId: string) {
   return value as Record<string, unknown>
 }
 
+export async function getDiscovery(targetId: string) {
+  const path = `/api/targets/${encodeURIComponent(targetId)}/discovery`
+  const value = await get<unknown>(path)
+  const identity = isRecord(value) ? value.discovery : null
+  if (!isRecord(value) || !isRecord(identity) || !isNonemptyString(identity.hostname)
+    || !isNonemptyString(identity.os) || !isNonemptyString(identity.os_version)
+    || !isNonemptyString(identity.kernel) || !isNonemptyString(identity.architecture)
+    || typeof identity.primary_ip !== 'string') malformed(path, 'expected read-only OS, version, architecture, kernel and primary IP fields')
+  return value as Record<string, unknown>
+}
+
 export async function getAssessment(targetId: string) {
   const path = `/api/targets/${encodeURIComponent(targetId)}/assessment`
   const value = await get<unknown>(path)
   if (!isRecord(value) || !isNonemptyString(value.target_id) || !isNonemptyString(value.target_name)
     || !isRecord(value.assessment) || !isNonemptyString(value.assessment.platform) || !Array.isArray(value.assessment.findings)
     || !isNonemptyString(value.assessment_observation_id) || !isNonemptyString(value.assessment_trust_status)
-    || !isNonemptyString(value.policy_status) || !isRecord(value.policy)) {
+    || !isNonemptyString(value.policy_status) || !isRecord(value.policy)
+    || !isRecord(value.policy_evaluation) || !isNonemptyString(value.policy_evaluation.decision)
+    || !isNonemptyString(value.policy_evaluation.reported_decision) || !isNonemptyString(value.policy_evaluation.identity_status)
+    || !Array.isArray(value.policy_evaluation.reasons)) {
     malformed(path, 'expected assessment.platform and an assessment.findings array')
   }
   value.assessment.findings.forEach((finding, index) => {
@@ -97,6 +147,47 @@ export async function getPlan(targetId: string) {
       || !isNonemptyString(action.execution_mode)) malformed(path, `action at index ${index} is malformed`)
   })
   return value as Record<string, unknown>
+}
+
+export async function getRemediationRuns(): Promise<DemoRemediationRun[]> {
+  const path = '/api/demo/remediation-runs'
+  const value = await get<unknown>(path)
+  if (!isRecord(value) || value.classification !== 'LOCAL_SANDBOX_ONLY' || !Array.isArray(value.runs)) malformed(path, 'expected LOCAL_SANDBOX_ONLY and a runs array')
+  return value.runs.map((run, index) => {
+    if (!isRecord(run) || !isNonemptyString(run.run_id) || !isNonemptyString(run.target_id)
+      || !isNonemptyString(run.platform) || !isNonemptyString(run.scenario) || !isNonemptyString(run.status)
+      || run.sandbox_only !== true || run.test_only_trust !== true || run.live_target_modified !== false
+      || !isRecord(run.result)) malformed(path, `run at index ${index} violates the sandbox result contract`)
+    return run as DemoRemediationRun
+  })
+}
+
+export async function getDecoyEvents(): Promise<{ active_listener_count: number; events: DemoDecoyEvent[] }> {
+  const path = '/api/demo/decoy-events'
+  const value = await get<unknown>(path)
+  if (!isRecord(value) || value.classification !== 'SIMULATED' || !Array.isArray(value.events)
+    || typeof value.active_listener_count !== 'number' || value.active_listener_count !== 0) malformed(path, 'expected a SIMULATED event response and zero live listeners')
+  const events = value.events.map((event, index) => {
+    if (!isRecord(event) || !isNonemptyString(event.event_id) || !isNonemptyString(event.batch_id)
+      || !isNonemptyString(event.decoy_id) || !isNonemptyString(event.category) || !isNonemptyString(event.source_address)
+      || event.simulation_mode !== 'SIMULATED' || !isNonemptyString(event.source_classification)
+      || !isNonemptyString(event.correlation_id) || !isNonemptyString(event.occurred_at)) malformed(path, `event at index ${index} is not explicitly simulated or is malformed`)
+    return event as DemoDecoyEvent
+  })
+  return { active_listener_count: value.active_listener_count, events }
+}
+
+export async function getAuditEvents(): Promise<{ integrity: { status: string; event_count: number; error: string | null }; events: AuditEvent[] }> {
+  const path = '/api/audit/events'
+  const value = await get<unknown>(path)
+  if (!isRecord(value) || !isRecord(value.integrity) || !['VALID', 'INVALID'].includes(String(value.integrity.status))
+    || typeof value.integrity.event_count !== 'number' || !Array.isArray(value.events)) malformed(path, 'expected audit integrity status and event array')
+  const events = value.events.map((event, index) => {
+    if (!isRecord(event) || typeof event.sequence !== 'number' || !isNonemptyString(event.event_id)
+      || !isNonemptyString(event.event_type) || !isRecord(event.metadata) || !isNonemptyString(event.event_digest)) malformed(path, `event at index ${index} is malformed`)
+    return event as AuditEvent
+  })
+  return { integrity: value.integrity as { status: string; event_count: number; error: string | null }, events }
 }
 
 export function controllerUrl() { return base }
