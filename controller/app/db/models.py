@@ -305,6 +305,48 @@ class SecurityAuditEvent(Base):
     event_digest: Mapped[str] = mapped_column(String(71), nullable=False)
 
 
+class SandboxRemediationRun(Base):
+    """Persisted output from the local-only, fixed-action verification sandbox."""
+
+    __tablename__ = "sandbox_remediation_runs"
+    __table_args__ = (
+        CheckConstraint("sandbox_only = 1 AND test_only_trust = 1 AND live_target_modified = 0", name="ck_sandbox_runs_isolated"),
+        Index("ix_sandbox_run_recorded_at", "recorded_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    target_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    platform: Mapped[str] = mapped_column(String(64), nullable=False)
+    scenario: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    sandbox_only: Mapped[bool] = mapped_column(default=True, nullable=False)
+    test_only_trust: Mapped[bool] = mapped_column(default=True, nullable=False)
+    live_target_modified: Mapped[bool] = mapped_column(default=False, nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class DemoDecoyEvent(Base):
+    """Synthetic events only; this model has no link to target or executor state."""
+
+    __tablename__ = "demo_decoy_events"
+    __table_args__ = (
+        CheckConstraint("simulation_mode = 'SIMULATED'", name="ck_demo_decoy_events_simulated_only"),
+        Index("ix_demo_decoy_batch_time", "batch_id", "occurred_at"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    decoy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_address: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_classification: Mapped[str] = mapped_column(String(64), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(64), nullable=False)
+    simulation_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="SIMULATED")
+
+
 # SQLite's create_all adds this new table to an existing database without
 # changing the existing targets schema. Triggers make ordinary SQL/ORM writes
 # append-only; the payload hash is still only an integrity comparison, not an

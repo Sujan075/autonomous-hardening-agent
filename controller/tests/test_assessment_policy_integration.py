@@ -17,7 +17,7 @@ from app.agents.identity import (
     bind_target_to_agent, create_pending_agent,
 )
 from app.assessments.policy import (
-    ASSESSMENT_POLICY_SCHEMA, AssessmentPolicyError, resolve_assessment_policy,
+    ASSESSMENT_POLICY_SCHEMA, AssessmentPolicyError, evaluate_assessment, resolve_assessment_policy,
     validate_assessment_matches_policy,
 )
 from app.auth.oidc import Principal, require_target_read
@@ -31,6 +31,13 @@ from app.main import app
 from app.policies.registry import canonical_definition, register_definition
 from app.policies.review import review_policy_definition
 from app.policies.trust import PolicyTrustPin
+from app.policies.centos_stream9 import (
+    CENTOS_STREAM9_CATALOG_VERSION,
+    CENTOS_STREAM9_OS_VERSION,
+    CENTOS_STREAM9_POLICY_VERSION,
+    CENTOS_STREAM9_PLATFORM,
+    centos_stream9_policy_definition,
+)
 
 
 NOW = datetime.now(timezone.utc)
@@ -41,6 +48,7 @@ ASSESSMENT = {
         "control_id": "TEST-SSH-1", "title": "Test SSH control", "status": "PASS",
         "applicability": "APPLICABLE", "severity": "INFO", "current_value": "no",
         "expected_value": "no", "message": "test fixture", "source": "test-only",
+        "evidence": [{"name": "TestSetting", "value": "no", "source": "test-only"}],
     }],
 }
 DISCOVERY = {
@@ -103,17 +111,25 @@ class AssessmentPolicyIntegrationTests(unittest.TestCase):
         )
         return credential
 
-    def make_policy(self, *, version="test-policy-v1", os_version=OS_VERSION, reviewed=True, assigned=True):
-        definition = {
-            "schema": ASSESSMENT_POLICY_SCHEMA,
-            "platform": "ubuntu",
-            "os_version": os_version,
-            "architecture": "arm64",
-            "controls": [{"control_id": "TEST-SSH-1", "expected_value": "no"}],
-        }
+    def make_policy(
+        self, *, version="test-policy-v1", os_version=OS_VERSION, platform="ubuntu",
+        reviewed=True, assigned=True, definition=None, catalog_version="test-catalog-v1",
+    ):
+        if definition is None:
+            definition = {
+                "schema": ASSESSMENT_POLICY_SCHEMA,
+                "platform": platform,
+                "os_version": os_version,
+                "architecture": "arm64",
+                "controls": [{
+                    "control_id": "TEST-SSH-1", "title": "Test SSH control", "severity": "INFO",
+                    "expected_value": "no",
+                    "evidence": [{"name": "TestSetting", "source": "test-only", "method": "fixed fixture"}],
+                }],
+            }
         row = register_definition(
-            self.db, platform="ubuntu", policy_version=version,
-            catalog_version="test-catalog-v1", definition=definition,
+            self.db, platform=platform, policy_version=version,
+            catalog_version=catalog_version, definition=definition,
             provenance_reference="test-only:assessment-policy-fixture",
         )
         pin = PolicyTrustPin(
@@ -163,6 +179,10 @@ class AssessmentPolicyIntegrationTests(unittest.TestCase):
         result = response.json()
         self.assertEqual(result["assessment"], ASSESSMENT)
         self.assertEqual(result["policy_status"], "reviewed_assignment_matched_to_agent_reported_result")
+        self.assertEqual(result["policy_evaluation"]["decision"], "INDETERMINATE")
+        self.assertEqual(result["policy_evaluation"]["reported_decision"], "COMPLIANT")
+        self.assertEqual(result["policy_evaluation"]["identity_status"], "unauthenticated_or_unbound")
+        self.assertEqual(result["policy_evaluation"]["controls"][0]["observed_value"], "no")
         self.assertEqual(result["policy"]["definition_digest"], row.definition_sha256)
         self.assertEqual(result["policy"]["os_version"], OS_VERSION)
         self.assertFalse(result["policy"]["agent_channel_authenticated"])
@@ -177,6 +197,8 @@ class AssessmentPolicyIntegrationTests(unittest.TestCase):
         self.assertEqual(event_row.policy_definition_id, row.id)
         self.assertNotIn("token", event_row.metadata_json.lower())
         self.assertNotIn("credential", event_row.metadata_json.lower())
+        self.assertEqual(json.loads(event_row.metadata_json)["policy_decision"], "INDETERMINATE")
+        self.assertEqual(json.loads(event_row.metadata_json)["reported_decision"], "COMPLIANT")
 
     def test_missing_assignment_fails_before_agent_request(self):
         response = self.client.get(f"/api/targets/{self.target.id}/assessment")
@@ -259,8 +281,176 @@ class AssessmentPolicyIntegrationTests(unittest.TestCase):
         mutated["findings"][0]["expected_value"] = "yes"
         with self.assertRaises(AssessmentPolicyError):
             validate_assessment_matches_policy(policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(mutated))
+        missing = {"platform": "ubuntu", "findings": []}
+        with self.assertRaises(AssessmentPolicyError):
+            validate_assessment_matches_policy(policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(missing))
+        unexpected = json.loads(json.dumps(ASSESSMENT))
+        unexpected["findings"].append({**unexpected["findings"][0], "control_id": "UNEXPECTED"})
+        with self.assertRaises(AssessmentPolicyError):
+            validate_assessment_matches_policy(policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(unexpected))
         with self.assertRaises(AssessmentPolicyError):
             validate_assessment_matches_policy(policy, target=self.target, discovery={**DISCOVERY, "architecture": "amd64"}, raw_assessment=json.dumps(ASSESSMENT))
+
+    def test_policy_evaluation_distinguishes_noncompliant_and_uncertain_findings(self):
+        self.make_policy()
+        policy = resolve_assessment_policy(self.db, target=self.target)
+
+        failing = json.loads(json.dumps(ASSESSMENT))
+        finding = failing["findings"][0]
+        finding.update(status="FAIL", current_value="yes")
+        finding["evidence"][0]["value"] = "yes"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(failing)
+        )
+        decision = evaluate_assessment(policy, assessment)
+        self.assertEqual(decision.decision, "INDETERMINATE")
+        self.assertEqual(decision.reported_decision, "NON_COMPLIANT")
+
+        unknown = json.loads(json.dumps(ASSESSMENT))
+        unknown["findings"][0]["status"] = "UNKNOWN"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(unknown)
+        )
+        decision = evaluate_assessment(policy, assessment)
+        self.assertEqual(decision.decision, "INDETERMINATE")
+        self.assertTrue(any("unknown status" in reason for reason in decision.reasons))
+
+        errored = json.loads(json.dumps(ASSESSMENT))
+        errored["findings"][0].update(status="ERROR", error={
+            "code": "COLLECTION_FAILED", "message": "fixture failure", "source": "test-only",
+        })
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(errored)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).decision, "INDETERMINATE")
+
+    def test_policy_evaluation_rejects_unsubstantiated_or_contradictory_evidence(self):
+        self.make_policy()
+        policy = resolve_assessment_policy(self.db, target=self.target)
+
+        malformed = json.loads(json.dumps(ASSESSMENT))
+        malformed["findings"][0]["evidence"][0]["value"] = "yes"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(malformed)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).decision, "INDETERMINATE")
+
+        wrong_source = json.loads(json.dumps(ASSESSMENT))
+        wrong_source["findings"][0]["source"] = "agent.claimed.config"
+        wrong_source["findings"][0]["evidence"][0]["source"] = "agent.claimed.config"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(wrong_source)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).reported_decision, "INDETERMINATE")
+
+        wrong_name = json.loads(json.dumps(ASSESSMENT))
+        wrong_name["findings"][0]["evidence"][0]["name"] = "OtherSetting"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(wrong_name)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).reported_decision, "INDETERMINATE")
+
+        duplicate_evidence = json.loads(json.dumps(ASSESSMENT))
+        duplicate_evidence["findings"][0]["evidence"].append(
+            duplicate_evidence["findings"][0]["evidence"][0]
+        )
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(duplicate_evidence)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).decision, "INDETERMINATE")
+
+        contradictory = json.loads(json.dumps(ASSESSMENT))
+        contradictory["findings"][0]["current_value"] = "yes"
+        contradictory["findings"][0]["evidence"][0]["value"] = "yes"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(contradictory)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).decision, "INDETERMINATE")
+
+        false_pass = json.loads(json.dumps(ASSESSMENT))
+        false_pass["findings"][0]["current_value"] = "yes"
+        false_pass["findings"][0]["evidence"][0]["value"] = "yes"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(false_pass)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).reported_decision, "INDETERMINATE")
+
+        false_fail = json.loads(json.dumps(ASSESSMENT))
+        false_fail["findings"][0]["status"] = "FAIL"
+        assessment = validate_assessment_matches_policy(
+            policy, target=self.target, discovery=DISCOVERY, raw_assessment=json.dumps(false_fail)
+        )
+        self.assertEqual(evaluate_assessment(policy, assessment).reported_decision, "INDETERMINATE")
+
+    def test_centos_project_policy_review_assignment_and_decision_use_exact_evidence_contract(self):
+        self.target.platform = CENTOS_STREAM9_PLATFORM
+        self.db.commit()
+        row = self.make_policy(
+            version=CENTOS_STREAM9_POLICY_VERSION,
+            catalog_version=CENTOS_STREAM9_CATALOG_VERSION,
+            platform=CENTOS_STREAM9_PLATFORM,
+            os_version=CENTOS_STREAM9_OS_VERSION,
+            definition=centos_stream9_policy_definition(),
+        )
+        payload = {
+            "platform": CENTOS_STREAM9_PLATFORM,
+            "findings": [
+                {
+                    "control_id": "CSTS9-SSH-001", "title": "Disable SSH empty passwords", "status": "PASS",
+                    "applicability": "APPLICABLE", "severity": "MEDIUM", "current_value": "no",
+                    "expected_value": "no", "message": "matches baseline", "source": "ssh.effective_config",
+                    "evidence": [{"name": "PermitEmptyPasswords", "value": "no", "source": "ssh.effective_config"}],
+                },
+                {
+                    "control_id": "CSTS9-SSH-002", "title": "Disable SSH root login", "status": "FAIL",
+                    "applicability": "APPLICABLE", "severity": "HIGH", "current_value": "without-password",
+                    "expected_value": "no", "message": "differs from baseline", "source": "ssh.effective_config",
+                    "evidence": [{"name": "PermitRootLogin", "value": "without-password", "source": "ssh.effective_config"}],
+                },
+                {
+                    "control_id": "CSTS9-SSH-003", "title": "Disable SSH user environment", "status": "PASS",
+                    "applicability": "APPLICABLE", "severity": "MEDIUM", "current_value": "no",
+                    "expected_value": "no", "message": "matches baseline", "source": "ssh.effective_config",
+                    "evidence": [{"name": "PermitUserEnvironment", "value": "no", "source": "ssh.effective_config"}],
+                },
+                {
+                    "control_id": "CSTS9-SSH-004", "title": "Enable SSH PAM", "status": "PASS",
+                    "applicability": "APPLICABLE", "severity": "MEDIUM", "current_value": "yes",
+                    "expected_value": "yes", "message": "matches baseline", "source": "ssh.effective_config",
+                    "evidence": [{"name": "UsePAM", "value": "yes", "source": "ssh.effective_config"}],
+                },
+            ],
+        }
+        discovery = {
+            **DISCOVERY, "os_version": CENTOS_STREAM9_OS_VERSION,
+        }
+        self.agent_transport(assessment=payload, discovery=discovery)
+        response = self.client.get(f"/api/targets/{self.target.id}/assessment")
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["policy"]["policy_version"], CENTOS_STREAM9_POLICY_VERSION)
+        self.assertEqual(result["policy_evaluation"]["decision"], "INDETERMINATE")
+        self.assertEqual(result["policy_evaluation"]["reported_decision"], "NON_COMPLIANT")
+        self.assertEqual(result["policy_evaluation"]["identity_status"], "unauthenticated_or_unbound")
+        assignment = self.db.get(TargetPolicyAssignment, self.target.id)
+        self.assertEqual(assignment.binding_generation, self.db.scalar(
+            select(TargetAgentBinding).where(TargetAgentBinding.target_id == self.target.id)
+        ).generation)
+        policy_event = self.db.scalar(select(SecurityAuditEvent).where(SecurityAuditEvent.event_type == "policy.review.approved"))
+        assessment_event = self.db.scalar(select(SecurityAuditEvent).where(SecurityAuditEvent.event_type == "assessment.collected"))
+        self.assertIsNotNone(policy_event)
+        self.assertIsNotNone(assessment_event)
+        self.assertEqual(json.loads(assessment_event.metadata_json)["policy_decision"], "INDETERMINATE")
+        self.assertEqual(json.loads(assessment_event.metadata_json)["reported_decision"], "NON_COMPLIANT")
+
+    def test_policy_evaluator_rejects_controller_target_identity_mismatch(self):
+        self.make_policy()
+        policy = resolve_assessment_policy(self.db, target=self.target)
+        other_target = Target(id="another-target", name="another", platform="ubuntu", address="127.0.0.2")
+        with self.assertRaises(AssessmentPolicyError):
+            validate_assessment_matches_policy(
+                policy, target=other_target, discovery=DISCOVERY, raw_assessment=json.dumps(ASSESSMENT)
+            )
 
     def test_agent_failure_or_malformed_result_creates_no_success_audit_or_observation(self):
         self.make_policy()

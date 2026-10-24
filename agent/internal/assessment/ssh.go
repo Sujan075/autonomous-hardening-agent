@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	PlatformUbuntu  = string(catalog.PlatformUbuntu)
-	sshConfigSource = catalog.EffectiveSSHConfigSource
-	sudoBinary      = "/usr/bin/sudo"
-	sshdBinary      = "/usr/sbin/sshd"
+	PlatformUbuntu       = string(catalog.PlatformUbuntu)
+	PlatformCentOSStream = string(catalog.PlatformCentOSStream)
+	sshConfigSource      = catalog.EffectiveSSHConfigSource
+	sudoBinary           = "/usr/bin/sudo"
+	sshdBinary           = "/usr/sbin/sshd"
 )
 
 type sshConfigRunner func() (stdout, stderr []byte, err error)
@@ -23,12 +24,16 @@ func AssessSSHControls() []Finding {
 }
 
 func assessSSHControls(runner sshConfigRunner) []Finding {
-	controls := catalog.Controls(catalog.PlatformUbuntu)
+	return assessSSHControlsForPlatform(catalog.PlatformUbuntu, runner)
+}
+
+func assessSSHControlsForPlatform(platform catalog.Platform, runner sshConfigRunner) []Finding {
+	controls := catalog.Controls(platform)
 	if err := catalog.Validate(controls); err != nil {
 		return []Finding{sshAssessmentError(fmt.Errorf("invalid control catalog: %w", err))}
 	}
 
-	config, err := readEffectiveSSHConfig(runner)
+	config, err := readEffectiveSSHConfigForControls(runner, controls)
 	if err != nil {
 		return []Finding{sshAssessmentError(err)}
 	}
@@ -49,6 +54,10 @@ func runEffectiveSSHConfig() ([]byte, []byte, error) {
 }
 
 func readEffectiveSSHConfig(runner sshConfigRunner) (map[string]string, error) {
+	return readEffectiveSSHConfigForControls(runner, catalog.Controls(catalog.PlatformUbuntu))
+}
+
+func readEffectiveSSHConfigForControls(runner sshConfigRunner, controls []catalog.Control) (map[string]string, error) {
 	stdout, stderr, err := runner()
 	if err != nil {
 		diagnostic := sanitizeDiagnostic(stderr)
@@ -58,7 +67,7 @@ func readEffectiveSSHConfig(runner sshConfigRunner) (map[string]string, error) {
 		return nil, fmt.Errorf("failed to evaluate effective SSH configuration: %w (stderr: %s)", err, diagnostic)
 	}
 
-	config, err := parseEffectiveSSHConfig(stdout)
+	config, err := parseEffectiveSSHConfigForControls(stdout, controls)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse effective SSH configuration: %w", err)
 	}
@@ -66,7 +75,13 @@ func readEffectiveSSHConfig(runner sshConfigRunner) (map[string]string, error) {
 }
 
 func parseEffectiveSSHConfig(output []byte) (map[string]string, error) {
-	controls := catalog.Controls(catalog.PlatformUbuntu)
+	return parseEffectiveSSHConfigForControls(output, catalog.Controls(catalog.PlatformUbuntu))
+}
+
+func parseEffectiveSSHConfigForControls(output []byte, controls []catalog.Control) (map[string]string, error) {
+	if err := catalog.Validate(controls); err != nil {
+		return nil, fmt.Errorf("invalid control catalog: %w", err)
+	}
 	requiredDirectives := make(map[string]struct{}, len(controls))
 	for _, control := range controls {
 		requiredDirectives[strings.ToLower(control.EffectiveSettingKey)] = struct{}{}

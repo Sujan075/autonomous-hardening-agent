@@ -38,6 +38,7 @@ class RegistryError(ValueError):
 @dataclass(frozen=True)
 class ResolvedPolicyAssignment:
     target_id: str
+    agent_id: str
     binding_generation: str
     platform: str
     policy_version: str
@@ -157,6 +158,7 @@ def resolve_target_assignment(db: Session, *, target_id: str) -> ResolvedPolicyA
         raise RegistryError("policy/catalog platform does not match target")
     return ResolvedPolicyAssignment(
         target_id=target.id,
+        agent_id=binding.agent_id,
         binding_generation=binding.generation,
         platform=target.platform,
         policy_version=definition.policy_version,

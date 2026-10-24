@@ -4,6 +4,10 @@ An autonomous, policy-bounded security hardening platform designed to assess and
 
 See [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for the full project scope, evidence levels, current status, risks, roadmap, and acceptance criteria.
 
+For the read-only CentOS Stream 9 ARM64 assessment demo, see the [judge runbook](docs/runbooks/CENTOS_STREAM_9_ARM64_JUDGE_DEMO.md) and its [lifecycle acceptance matrix](docs/test-matrix/CENTOS_STREAM_9_ARM64_V1.md). The captured CentOS target evidence is read-only; CentOS remediation remains blocked.
+
+For the local-only OpenSSH fixture lifecycle, simulated decoy records, read-only demo APIs, and audit view, see the [integrated demo runbook](docs/runbooks/INTEGRATED_DEMO.md) and its [sandbox test matrix](docs/test-matrix/INTEGRATED_SANDBOX_V1.md). This fixture does not enable production or CentOS execution.
+
 ## Problem Statement
 
 SIH25237 — Autonomous Multi-Platform Security Hardening Agent

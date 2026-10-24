@@ -1,0 +1,7 @@
+captured_at_local=2026-10-23T23:29:06+05:30
+captured_at_utc=2026-10-23T17:59:06Z
+hostname=ah-centos-01
+os_identity=PRETTY_NAME="CentOS Stream 9"
+kernel=5.14.0-754.el9.aarch64
+architecture=aarch64
+agent_sha256=aa2c9ad558ae07afd43d7a7ff99f12d396d6a7e3ecbb39ed7b686a0e68d0937f

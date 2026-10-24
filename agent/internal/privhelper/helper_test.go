@@ -75,8 +75,8 @@ func newHelperFixture(t *testing.T, operation string) *helperFixture {
 		t.Fatal(err)
 	}
 	action := planner.Action{
-		ActionID: SupportedAction, ControlID: "SSH-5.1.20", Title: "Disable SSH root login",
-		ActionType: "set_sshd_option", CurrentValue: "yes", DesiredValue: "no",
+		ActionID: SupportedAction, ControlID: SupportedControlID, Title: "Disable SSH root login",
+		ActionType: SupportedActionType, CurrentValue: "yes", DesiredValue: "no",
 		RiskScore: 3.5, ExecutionMode: planner.ExecutionApproval, Reason: "Root login is enabled.",
 	}
 	plan := planner.Plan{Status: planner.PlanStatusReady, Platform: "ubuntu-24.04.5-arm64", Actions: []planner.Action{action}}

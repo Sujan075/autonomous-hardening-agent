@@ -46,9 +46,13 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
             assignment=SimpleNamespace(
                 policy_version="policy-test-v1", catalog_version="catalog-test-v1",
                 definition_digest="sha256:" + "a" * 64, platform="ubuntu",
+                target_id=TARGET_ID, agent_id="agent-test", binding_generation="generation-test",
             ),
             definition_id=1, os_version="Ubuntu 24.04.5 LTS", architecture="arm64",
             controls=(("CIS-1", "no"),),
+            control_details=(("CIS-1", "SSH setting", "high"),),
+            evidence_expectations=(("CIS-1", (("PermitRootLogin", "sshd", "sshd -T"),)),),
+            classification=None,
         )
         self.policy_patch = patch(
             "app.api.agent_status.resolve_assessment_policy", return_value=self.policy
@@ -95,8 +99,10 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
             "platform": "ubuntu",
             "findings": [{
                 "control_id": "CIS-1", "title": "SSH setting", "status": "FAIL",
+                "applicability": "APPLICABLE",
                 "severity": "high", "current_value": "yes", "expected_value": "no",
                 "message": "disable root login", "source": "sshd",
+                "evidence": [{"name": "PermitRootLogin", "value": "yes", "source": "sshd"}],
             }],
         }
         discovery_response = httpx.Response(
@@ -136,6 +142,16 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
                 "agent_channel_authenticated": False,
                 "planning_recommendations": "available_separately_at_plan_endpoint",
             },
+            "policy_evaluation": {
+                "decision": "INDETERMINATE",
+                "reported_decision": "NON_COMPLIANT",
+                "identity_status": "unauthenticated_or_unbound",
+                "reasons": ["CIS-1: observed value differs from policy", "agent identity is not authenticated and bound to the assigned target generation"],
+                "controls": [{
+                    "control_id": "CIS-1", "status": "FAIL", "observed_value": "yes",
+                    "expected_value": "no", "source": "sshd",
+                }],
+            },
         })
         self.assertEqual(mock_stream.call_args_list, [
             call("GET", "http://127.0.0.1:19000/discovery", timeout=5.0),
@@ -160,7 +176,12 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
         )
         upstream_response = httpx.Response(
             200,
-            json={"platform": "ubuntu", "findings": []},
+            json={"platform": "ubuntu", "findings": [{
+                "control_id": "CIS-1", "title": "SSH setting", "status": "PASS",
+                "applicability": "APPLICABLE", "severity": "INFO", "current_value": "no",
+                "expected_value": "no", "message": "compliant", "source": "sshd",
+                "evidence": [{"name": "PermitRootLogin", "value": "no", "source": "sshd"}],
+            }]},
             request=httpx.Request("GET", "http://127.0.0.1:19000/assessment"),
         )
         mock_stream.side_effect = [nullcontext(discovery_response), nullcontext(upstream_response)]

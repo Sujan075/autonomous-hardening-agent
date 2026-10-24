@@ -69,6 +69,44 @@ func TestBuildAssessmentPlanBlocksUnsupportedCentOSStreamAssessment(t *testing.T
 	}
 }
 
+func TestBuildAssessmentPlanAlwaysBlocksCentOSBaseline(t *testing.T) {
+	findings := make([]assessment.Finding, 0)
+	for _, control := range catalog.Controls(catalog.PlatformCentOSStream) {
+		finding := assessment.Finding{ControlID: control.ID, Title: control.Title, Status: assessment.StatusPass, Applicability: assessment.ApplicabilityApplicable, Severity: control.Severity, CurrentValue: control.ExpectedValue, ExpectedValue: control.ExpectedValue}
+		for _, ev := range control.Evidence {
+			finding.Source = ev.Source
+			finding.Evidence = append(finding.Evidence, assessment.Evidence{Name: ev.SettingKey, Value: control.ExpectedValue, Source: ev.Source})
+		}
+		findings = append(findings, finding)
+	}
+	for _, item := range []struct {
+		name     string
+		findings []assessment.Finding
+	}{
+		{"complete passing", findings},
+		{"complete failing", func() []assessment.Finding {
+			copy := append([]assessment.Finding(nil), findings...)
+			copy[1].Status = assessment.StatusFail
+			setCurrentValue(&copy[1], "without-password")
+			return copy
+		}()},
+		{"incomplete", findings[:3]},
+		{"uncertain", func() []assessment.Finding {
+			copy := append([]assessment.Finding(nil), findings...)
+			copy[0].Status = assessment.StatusUnknown
+			return copy
+		}()},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			plan := BuildAssessmentPlan(assessment.Assessment{Platform: assessment.PlatformCentOSStream, Findings: item.findings})
+			if plan.Platform != assessment.PlatformCentOSStream {
+				t.Errorf("platform=%s", plan.Platform)
+			}
+			assertBlockedWithoutActions(t, plan)
+		})
+	}
+}
+
 func TestBuildAssessmentPlanFailsClosedForIncompleteOrUncertainAssessments(t *testing.T) {
 	tests := []struct {
 		name    string

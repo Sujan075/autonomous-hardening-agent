@@ -7,6 +7,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/catalog"
 )
 
 const platformDispatchSource = "platform.dispatch"
@@ -50,8 +52,14 @@ func assessHost(goos, goarch string, releaseData []byte, releaseErr error, runne
 		}
 		return Assessment{Platform: PlatformUbuntu, Findings: assessSSHControls(runner)}
 	}
-	if id == "centos" && release["NAME"] == "CentOS Stream" {
-		return unsupportedPlatformAssessment("centos-stream", version, "CentOS Stream is detected, but no verified CentOS Stream control set or assessment adapter is registered")
+	if id == "centos" || release["NAME"] == "CentOS Stream" {
+		if id != "centos" || release["NAME"] != "CentOS Stream" || version != "9" || prettyName != "CentOS Stream 9" {
+			return unsupportedPlatformAssessment("centos-stream", version, "CentOS Stream identity is incomplete or outside the supported CentOS Stream 9 catalog scope")
+		}
+		if goarch != "arm64" {
+			return unsupportedPlatformAssessment("centos-stream", version, fmt.Sprintf("CentOS Stream 9 architecture %q is not in the supported catalog scope", goarch))
+		}
+		return Assessment{Platform: PlatformCentOSStream, Findings: assessSSHControlsForPlatform(catalog.PlatformCentOSStream, runner)}
 	}
 	platform := id
 	if platform == "" {

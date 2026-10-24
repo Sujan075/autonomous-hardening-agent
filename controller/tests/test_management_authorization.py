@@ -13,8 +13,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app.auth.oidc import OIDCAuthenticator, OIDCSettings
 from app.db.database import get_db
-from app.audit.service import AuditError, verify_chain
-from app.db.models import AgentIdentity, Base, EnrollmentChallenge, SecurityAuditEvent, Target
+from app.audit.service import AuditError, append_event, verify_chain
+from app.db.models import AgentIdentity, Base, DemoDecoyEvent, EnrollmentChallenge, SandboxRemediationRun, SecurityAuditEvent, Target
 from app.main import app
 
 
@@ -115,6 +115,7 @@ class ManagementAuthorizationTests(unittest.TestCase):
                     "name": "must-not-create", "platform": "ubuntu",
                 }).status_code, 503)
                 self.assertEqual(self.client.get("/api/targets/example/plan").status_code, 503)
+                self.assertEqual(self.client.get("/api/targets/example/discovery").status_code, 503)
             finally:
                 self.auth_patch.start()
         with self.Session() as session:
@@ -244,6 +245,45 @@ class ManagementAuthorizationTests(unittest.TestCase):
                 headers=self.bearer(["target-admin", "enrollment-admin"]),
             )
         self.assertEqual(response.status_code, 403)
+
+    def test_demo_and_audit_apis_are_read_only_role_gated_and_feature_gated(self):
+        with self.Session() as session:
+            append_event(session, event_type="decoy.simulated_batch_created", metadata={"mode": "SIMULATED"})
+            session.add(DemoDecoyEvent(
+                event_id="00000000-0000-0000-0000-000000000001", batch_id="00000000-0000-0000-0000-000000000002",
+                decoy_id="loopback-decoy-simulator", occurred_at=datetime.now(timezone.utc),
+                category="connection_attempt", source_address="198.51.100.10",
+                source_classification="RFC5737_DOCUMENTATION_RANGE_SIMULATED",
+                correlation_id="00000000-0000-0000-0000-000000000002:01",
+                outcome="simulated_event_recorded", simulation_mode="SIMULATED",
+            ))
+            session.add(SandboxRemediationRun(
+                run_id="run-demo-1", target_id="sandbox-local-demo", platform="ubuntu-sandbox-fixture",
+                scenario="roundtrip", status="ROLLED_BACK", result_json='{"sandbox_only":true}',
+            ))
+            session.commit()
+
+        disabled = self.client.get("/api/demo/decoy-events", headers=self.bearer(["target-reader"]))
+        self.assertEqual(disabled.status_code, 404)
+        self.assertEqual(self.client.get("/api/audit/events", headers=self.bearer(["target-reader"])).status_code, 503)
+        with patch.dict("os.environ", {"AHA_ENABLE_DEMO_READ_API": "1", "OIDC_AUDIT_READ_ROLE": "audit-reader"}):
+            self.assertEqual(self.client.get("/api/demo/decoy-events").status_code, 401)
+            self.assertEqual(self.client.get("/api/demo/decoy-events", headers=self.bearer(["target-admin"])).status_code, 403)
+            decoys = self.client.get("/api/demo/decoy-events", headers=self.bearer(["target-reader"]))
+            runs = self.client.get("/api/demo/remediation-runs", headers=self.bearer(["target-reader"]))
+            denied_audit = self.client.get("/api/audit/events", headers=self.bearer(["target-reader"]))
+            audit = self.client.get("/api/audit/events", headers=self.bearer(["audit-reader"]))
+            self.assertEqual(decoys.status_code, 200)
+            self.assertEqual(decoys.json()["classification"], "SIMULATED")
+            self.assertFalse(decoys.json()["decoys"][0]["executor_connected"])
+            self.assertEqual(decoys.json()["events"][0]["simulation_mode"], "SIMULATED")
+            self.assertEqual(runs.status_code, 200)
+            self.assertTrue(runs.json()["runs"][0]["test_only_trust"])
+            self.assertEqual(denied_audit.status_code, 403)
+            self.assertEqual(audit.status_code, 200)
+            self.assertEqual(audit.json()["integrity"]["status"], "VALID")
+            self.assertEqual(self.client.post("/api/demo/decoy-events", headers=self.bearer(["target-reader"])).status_code, 405)
+            self.assertEqual(self.client.get("/api/demo/decoy-events?limit=501", headers=self.bearer(["target-reader"])).status_code, 422)
 
     def _agent(self, agent_id):
         with self.Session() as session:

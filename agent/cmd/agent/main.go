@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/assessment"
-	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/executor"
 	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/planner"
 	"github.com/Sujan075/autonomous-hardening-agent/agent/internal/transport"
 )
@@ -40,6 +39,33 @@ func main() {
 		port = "9000"
 	}
 
+	mux := newHandler(agentID)
+	server, tlsConfig, err := transport.Server(transport.Config{
+		Host:                 host,
+		Port:                 port,
+		CertFile:             os.Getenv("AGENT_TLS_CERT_FILE"),
+		KeyFile:              os.Getenv("AGENT_TLS_KEY_FILE"),
+		ClientCAFile:         os.Getenv("AGENT_TLS_CLIENT_CA_FILE"),
+		ExpectedControllerID: os.Getenv("AGENT_TLS_CONTROLLER_IDENTITY"),
+	}, mux)
+	if err != nil {
+		log.Fatalf("agent listener configuration rejected: %v", err)
+	}
+	if tlsConfig != nil {
+		server.Handler = transport.ReadOnlyHandler(mux)
+	}
+	log.Printf("agent_id=%s listening=%s tls=%t", agentID, server.Addr, tlsConfig != nil)
+	if tlsConfig != nil {
+		err = server.ListenAndServeTLS("", "")
+	} else {
+		err = server.ListenAndServe()
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func newHandler(agentID string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -69,8 +95,6 @@ func main() {
 	mux.HandleFunc("/assessment", assessment.HTTPHandler)
 
 	mux.HandleFunc("/plan", planner.HTTPHandler)
-	mux.HandleFunc("/execute", executor.ExecuteHandler)
-	mux.HandleFunc("/rollback", executor.RollbackHandler)
 
 	mux.HandleFunc("/discovery", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -95,29 +119,7 @@ func main() {
 		})
 	})
 
-	server, tlsConfig, err := transport.Server(transport.Config{
-		Host:                 host,
-		Port:                 port,
-		CertFile:             os.Getenv("AGENT_TLS_CERT_FILE"),
-		KeyFile:              os.Getenv("AGENT_TLS_KEY_FILE"),
-		ClientCAFile:         os.Getenv("AGENT_TLS_CLIENT_CA_FILE"),
-		ExpectedControllerID: os.Getenv("AGENT_TLS_CONTROLLER_IDENTITY"),
-	}, mux)
-	if err != nil {
-		log.Fatalf("agent listener configuration rejected: %v", err)
-	}
-	if tlsConfig != nil {
-		server.Handler = transport.ReadOnlyHandler(mux)
-	}
-	log.Printf("agent_id=%s listening=%s tls=%t", agentID, server.Addr, tlsConfig != nil)
-	if tlsConfig != nil {
-		err = server.ListenAndServeTLS("", "")
-	} else {
-		err = server.ListenAndServe()
-	}
-	if err != nil {
-		log.Fatal(err)
-	}
+	return mux
 }
 
 func readOSVersion() string {
