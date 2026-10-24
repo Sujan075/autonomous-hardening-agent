@@ -54,6 +54,7 @@ class OIDCSettings:
     target_admin_role: str
     enrollment_admin_role: str
     policy_review_role: str | None = None
+    audit_read_role: str | None = None
 
     @classmethod
     def from_env(cls) -> "OIDCSettings":
@@ -70,6 +71,7 @@ class OIDCSettings:
         if any(not value for value in values.values()):
             raise OIDCConfigurationError("OIDC issuer, audience, JWKS and role configuration are required")
         values["policy_review_role"] = os.environ.get("OIDC_POLICY_REVIEW_ROLE", "").strip() or None
+        values["audit_read_role"] = os.environ.get("OIDC_AUDIT_READ_ROLE", "").strip() or None
         settings = cls(**values)
         settings.validate()
         return settings
@@ -99,6 +101,12 @@ class OIDCSettings:
             or len(self.policy_review_role) > 128
         ):
             raise OIDCConfigurationError("OIDC policy-review role is invalid")
+        if self.audit_read_role is not None and (
+            not isinstance(self.audit_read_role, str)
+            or not self.audit_read_role
+            or len(self.audit_read_role) > 128
+        ):
+            raise OIDCConfigurationError("OIDC audit-read role is invalid")
 
 
 @dataclass(frozen=True)
@@ -399,6 +407,17 @@ def require_role(role_setting: str):
 require_target_read = require_role("target_read_role")
 require_target_admin = require_role("target_admin_role")
 require_enrollment_admin = require_role("enrollment_admin_role")
+
+
+def require_audit_read(
+    principal: Principal = Depends(get_current_principal),
+    settings: OIDCSettings = Depends(get_oidc_settings),
+) -> Principal:
+    if not settings.audit_read_role:
+        raise HTTPException(status_code=503, detail="Audit-read authorization is not configured")
+    if settings.audit_read_role not in principal.roles:
+        raise HTTPException(status_code=403, detail="Required role is missing")
+    return principal
 
 
 def require_policy_review(

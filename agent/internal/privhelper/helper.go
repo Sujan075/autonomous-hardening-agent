@@ -19,10 +19,12 @@ import (
 )
 
 const (
-	MaxRequestBytes = 20 << 10
-	MaxRequestID    = 128
-	SupportedAction = executor.ActionSSHRootLogin
-	RequestSchema   = "agent-privileged-request/v1"
+	MaxRequestBytes     = 20 << 10
+	MaxRequestID        = 128
+	SupportedAction     = executor.ActionSSHRootLogin
+	SupportedActionType = "SET_SSH_DIRECTIVE"
+	SupportedControlID  = "5.1.20"
+	RequestSchema       = "agent-privileged-request/v1"
 )
 
 var (
@@ -50,24 +52,24 @@ type Request struct {
 // independently authenticated here. Append must return nil only after durable
 // persistence has been acknowledged by its implementation.
 type AuditEvent struct {
-	OccurredAt             time.Time
-	EventType              string
-	RequestID              string
-	Issuer                 string
-	ApproverSubjectClaim   string
-	AgentID                string
-	TargetID               string
-	BindingGeneration      string
-	Operation              string
-	ActionID               string
-	ActionDigest           string
-	PolicyVersion          string
-	CatalogVersion         string
-	PlanDigest             string
-	EvidenceDigest         string
-	RecoveryManifestDigest string
-	Outcome                string
-	Verified               bool
+	OccurredAt             time.Time `json:"occurred_at"`
+	EventType              string    `json:"event_type"`
+	RequestID              string    `json:"request_id"`
+	Issuer                 string    `json:"issuer"`
+	ApproverSubjectClaim   string    `json:"approver_subject_claim"`
+	AgentID                string    `json:"agent_id"`
+	TargetID               string    `json:"target_id"`
+	BindingGeneration      string    `json:"binding_generation"`
+	Operation              string    `json:"operation"`
+	ActionID               string    `json:"action_id"`
+	ActionDigest           string    `json:"action_digest"`
+	PolicyVersion          string    `json:"policy_version"`
+	CatalogVersion         string    `json:"catalog_version"`
+	PlanDigest             string    `json:"plan_digest"`
+	EvidenceDigest         string    `json:"evidence_digest"`
+	RecoveryManifestDigest string    `json:"recovery_manifest_digest"`
+	Outcome                string    `json:"outcome"`
+	Verified               bool      `json:"verified"`
 }
 
 type AuditSink interface {
@@ -153,8 +155,8 @@ func New(config Config) (*Helper, error) {
 	if config.Operation != approval.OperationExecute && config.Operation != approval.OperationRollback {
 		return nil, errors.New("helper operation is unsupported")
 	}
-	if config.Action.ActionID != SupportedAction || config.Action.ControlID != "SSH-5.1.20" ||
-		config.Action.ActionType != "set_sshd_option" || config.Action.DesiredValue != "no" {
+	if config.Action.ActionID != SupportedAction || config.Action.ControlID != SupportedControlID ||
+		config.Action.ActionType != SupportedActionType || config.Action.DesiredValue != "no" {
 		return nil, errors.New("helper action is not the fixed Ubuntu SSH root-login action")
 	}
 	actionDigest, err := approval.ActionDigest(config.Action)

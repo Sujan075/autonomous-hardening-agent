@@ -2,6 +2,8 @@
 
 This runbook performs a read-only agent demo against `AH-CENTOS-01`. The adapter supports only CentOS Stream 9 ARM64 and the four project-defined SSH baseline controls listed below. It does not claim CIS compliance or comprehensive hardening. Do not call `/execute` or `/rollback`.
 
+For the local Ubuntu-only fixture lifecycle, separate synthetic decoy events, dashboard, and audit view, see the [integrated demo runbook](INTEGRATED_DEMO.md). It does not enable CentOS execution or modify this target.
+
 ## Target and prerequisites
 
 Target identity recorded for the demo:
@@ -91,7 +93,7 @@ The separate Controller assessment endpoint requires an active target-agent bind
 
 The repository defines an explicit `PROJECT_DEFINED_BASELINE` contract for the four CentOS controls. A Controller integration fixture exercises registration, review with a test-only trust pin, assignment to the current binding generation, evaluation, and audit events. No production trust pin or authorized production assignment is configured. Planning therefore remains `BLOCKED` with zero actions; the Ubuntu executor is not a CentOS action boundary, and the internal Go helper is not a deployed privilege-separation service.
 
-The Controller exposes read-only discovery/status, assessment, and planning routes. It has no execution or rollback routes. The agent's legacy `/execute` and `/rollback` handlers are not an approved human-approval workflow: do not set `AGENT_EXECUTION_TOKEN`, send requests to those endpoints, or use this target for writes.
+The Controller exposes read-only discovery/status, assessment, and planning routes. It has no execution or rollback routes. The running agent does not register `/execute` or `/rollback`; legacy exported handlers return 404 even if `AGENT_EXECUTION_TOKEN` is set. Do not send mutation requests or use this target for writes.
 
 ## Expected assessment
 

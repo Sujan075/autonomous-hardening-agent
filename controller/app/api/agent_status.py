@@ -99,6 +99,12 @@ def agent_status(
     }
 
 
+@router.get("/{target_id}/discovery")
+def discovery(target_id: str, db: Session = Depends(get_db)) -> dict:
+    """Return the agent's read-only system identity payload through Controller auth."""
+    return _proxy_agent_json(target_id, db, "discovery", "discovery")
+
+
 def _proxy_agent_json(target_id: str, db: Session, endpoint: str, payload_name: str) -> dict:
     target = _get_target(target_id, db)
     base_url = _get_agent_base_url(target)

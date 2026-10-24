@@ -2,6 +2,8 @@
 
 This runbook demonstrates the repository's read-only Ubuntu SSH assessment slice. It does not demonstrate live remediation, formal CIS compliance, or a production deployment.
 
+For the local process/filesystem remediation fixture, synthetic decoy simulator, dashboard, and audit view, use the separate [integrated demo runbook](INTEGRATED_DEMO.md). Those sandbox runs do not change this runbook's read-only target boundary.
+
 ## 1. One-time preparation before judging
 
 The source checkout is known to exist on the Mac host at the repository path used for this task. The available UTM inventory lists `AH-UBUNTU-01` and `AH-UBUNTU-01-TEST`, both stopped when inspected. No guest was started, so this task could not establish a repository checkout path or binary path inside Ubuntu. The repository's deployment documentation does not give either path. Historical project status reports a Linux ARM64 build and VM checksum check, but do not record the artifact path, checksum, transfer command, or a repeatable deployment procedure. Do not assume that the Mac checkout is mounted inside the guest. **This runbook has not been dry-run inside UTM.**
@@ -24,7 +26,7 @@ git status --short --branch
 git rev-parse HEAD
 ```
 
-For the start of this correction, the expected branch is `infothon/rapid-integration` and the expected commit is `e69468fa8e3377433dd537f5fbf5fefd1a4d962d`. A later runbook revision should use the then-current reviewed checkpoint. A different revision may have different instructions or behavior. Do not overwrite an unexpected or dirty checkout.
+This runbook is read-only and may be used from the reviewed feature branch or a later approved checkpoint. Confirm the branch, commit, and working-tree state above against the checkpoint selected by the demo operator; this file intentionally does not pin an older integration commit. Do not overwrite an unexpected or dirty checkout.
 
 Before judging, open the Ubuntu UTM guest and log in using the operator's known VM access details. Confirm Ubuntu 24.04.5 ARM64, OpenSSH server tools, `sudo`, `curl`, and an unprivileged account for the agent. If using a guest checkout, verify its actual path and toolchain. Replace `<verified-checkout-path>` below with that observed path before running it; angle-bracket values are placeholders, not commands to type literally.
 
