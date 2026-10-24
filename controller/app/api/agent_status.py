@@ -139,7 +139,11 @@ def assessment(
             discovery=discovery,
             raw_assessment=raw_payload,
         )
-        policy_evaluation = evaluate_assessment(policy, parsed_assessment)
+        policy_evaluation = evaluate_assessment(
+            policy,
+            parsed_assessment,
+            authenticated_peer=authenticated_peer,
+        )
         payload = json.loads(raw_payload.decode("utf-8", errors="strict"))
         observation = store_assessment_observation(
             db,
@@ -167,6 +171,8 @@ def assessment(
                 "trust_status": observation.trust_status,
                 "finding_count": len(parsed_assessment.findings),
                 "policy_decision": policy_evaluation.decision,
+                "reported_decision": policy_evaluation.reported_decision,
+                "assessment_identity_status": policy_evaluation.identity_status,
             },
         )
         observation_id = observation.observation_id

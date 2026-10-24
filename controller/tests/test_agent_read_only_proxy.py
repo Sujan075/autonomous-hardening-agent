@@ -46,9 +46,13 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
             assignment=SimpleNamespace(
                 policy_version="policy-test-v1", catalog_version="catalog-test-v1",
                 definition_digest="sha256:" + "a" * 64, platform="ubuntu",
+                target_id=TARGET_ID, agent_id="agent-test", binding_generation="generation-test",
             ),
             definition_id=1, os_version="Ubuntu 24.04.5 LTS", architecture="arm64",
             controls=(("CIS-1", "no"),),
+            control_details=(("CIS-1", "SSH setting", "high"),),
+            evidence_expectations=(("CIS-1", (("PermitRootLogin", "sshd", "sshd -T"),)),),
+            classification=None,
         )
         self.policy_patch = patch(
             "app.api.agent_status.resolve_assessment_policy", return_value=self.policy
@@ -139,8 +143,10 @@ class AgentReadOnlyProxyTests(unittest.TestCase):
                 "planning_recommendations": "available_separately_at_plan_endpoint",
             },
             "policy_evaluation": {
-                "decision": "NON_COMPLIANT",
-                "reasons": ["CIS-1: observed value differs from policy"],
+                "decision": "INDETERMINATE",
+                "reported_decision": "NON_COMPLIANT",
+                "identity_status": "unauthenticated_or_unbound",
+                "reasons": ["CIS-1: observed value differs from policy", "agent identity is not authenticated and bound to the assigned target generation"],
                 "controls": [{
                     "control_id": "CIS-1", "status": "FAIL", "observed_value": "yes",
                     "expected_value": "no", "source": "sshd",
